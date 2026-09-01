@@ -12,14 +12,14 @@ evidence.
   diagram, every connection between components (with failure modes and
   tooling), every flow end-to-end, every domain's view into the platform,
   the complete API contract, and the build/security checklist. This is the
-  single source of truth — if code and this document disagree, the document
-  wins until it's deliberately updated.
-- **[SIH26190_System_Design.docx](SIH26190_System_Design.docx)** — the same
-  content as a readable Word document with every diagram rendered as an
-  image, for anyone who'd rather not read raw Markdown/Mermaid.
-- **[SIH26190_Examiner_Audit.docx](SIH26190_Examiner_Audit.docx)** — an
-  independent gap-analysis audit (technical, security, and presentation
-  findings), for tracking what's been fixed and what's still open.
+  **single source of truth** — if code and this document disagree, the
+  document wins until it's deliberately updated. Keep it that way: when you
+  change a decision in code, update this file in the same change, not later.
+
+A readable Word version and a point-in-time audit report exist but aren't
+kept in this repo — regenerating a full Word doc (17 rendered diagrams) on
+every edit isn't worth the overhead while this is still under active,
+parallel development. Ask if you need either regenerated.
 
 ## Current build status
 

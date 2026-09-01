@@ -9,9 +9,9 @@ router = APIRouter(prefix="/cases/{case_id}/bail", tags=["bail"])
 
 
 @router.post("/arrest")
-def record_arrest(case_id: str, claims: dict = Depends(require_role("io"))):
-    """POST /cases/:id/bail/arrest — IO / Police. Record arrest. Starts the
-    independent bail track (bail_status = Arrested)."""
+def record_arrest(case_id: str, claims: dict = Depends(require_role("io", "duty_officer"))):
+    """POST /cases/:id/bail/arrest — Investigating Officer / Duty Officer.
+    Record arrest. Starts the independent bail track (bail_status = Arrested)."""
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
 
 

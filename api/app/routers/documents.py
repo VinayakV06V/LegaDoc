@@ -23,11 +23,14 @@ def upload_document(claims: dict = Depends(get_current_claims)):
 @router.get("")
 def list_documents(
     status_filter: Optional[str] = Query(default=None, alias="status"),
-    claims: dict = Depends(require_role("admin")),
+    claims: dict = Depends(require_role("admin", "io")),
 ):
-    """GET /documents?status=needs_review — Admin / Recording officer. List
-    documents where the AI Parser fell back to fully-redacted after repeated
-    failure. Plain filtered query on the documents table."""
+    """GET /documents?status=needs_review — Admin / Investigating Officer.
+    List documents where the AI Parser fell back to fully-redacted after
+    repeated failure. Plain filtered query on the documents table. An IO
+    should only see this for their own assigned cases — filter by
+    CaseAssignment in the implementation, require_role alone isn't enough.
+    """
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
 
 
@@ -63,8 +66,10 @@ def retry_chain_write(document_id: str, claims: dict = Depends(require_role("adm
 
 
 @router.post("/{document_id}/redact-tag")
-def correct_redaction_tag(document_id: str, claims: dict = Depends(get_current_claims)):
-    """POST /documents/:id/redact-tag — Recording officer. Correct/override an
-    AI Parser sensitivity tag. This is a correction path over the AI Parser's
-    auto-tags, not the primary tagging mechanism."""
+def correct_redaction_tag(document_id: str, claims: dict = Depends(require_role("io"))):
+    """POST /documents/:id/redact-tag — Investigating Officer (the IO
+    assigned to this document's case — check CaseAssignment, role alone
+    isn't enough). Correct/override an AI Parser sensitivity tag. This is a
+    correction path over the AI Parser's auto-tags, not the primary tagging
+    mechanism."""
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")

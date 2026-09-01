@@ -361,7 +361,7 @@ relies on the IO noticing and following up manually.
 
 ```mermaid
 sequenceDiagram
-    participant IO as IO / Police
+    participant IO as Investigating Officer
     participant A as API
     participant D as DB
     participant Def as Defense / Accused
@@ -652,11 +652,11 @@ flowchart TD
 | GET | /documents/:id | Role-filtered | Fetch document | Returns redacted or full view per auto-tagged sensitivity spans + role |
 | GET | /documents/:id/versions | Role-filtered | Version history | Append-only — originals never overwritten |
 | GET | /documents/:id/chain-status | Role-filtered | Poll blockchain confirmation | Short-poll target for Flow 2 |
-| GET | /documents?status=needs_review | Admin / Recording officer | List documents where the AI Parser fell back to fully-redacted after repeated failure | Plain filtered query on the documents table |
+| GET | /documents?status=needs_review | Admin / Investigating Officer | List documents where the AI Parser fell back to fully-redacted after repeated failure | Plain filtered query on the documents table |
 | POST | /documents/:id/retry-chain-write | Admin | Manually re-trigger a stuck chain-write | Reuses the *original* idempotency key, never a fresh one — if Fabric actually confirmed the transaction before the crash, this guarantees the retry can't create a duplicate ledger entry |
-| POST | /documents/:id/redact-tag | Recording officer | Correct/override an AI Parser sensitivity tag | Correction path over the AI Parser's auto-tags, not the primary tagging mechanism |
+| POST | /documents/:id/redact-tag | Investigating Officer | Correct/override an AI Parser sensitivity tag | Correction path over the AI Parser's auto-tags, not the primary tagging mechanism. "Recording officer" in earlier drafts of this doc meant the IO assigned to the case — resolved to the actual role name for consistency with the Role & Authority Taxonomy |
 | POST | /cases/:id/file-charge-sheet | Prosecutor | Attempt charge sheet filing | Validated against Stage Requirements — 409 if incomplete |
-| POST | /cases/:id/bail/arrest | IO / Police | Record arrest | Starts independent bail track |
+| POST | /cases/:id/bail/arrest | Investigating Officer / Duty Officer | Record arrest | Starts independent bail track |
 | POST | /cases/:id/bail/application | Defense (submission-only) | File bail application | — |
 | POST | /cases/:id/bail/hearing-notice | Court | Schedule hearing | — |
 | POST | /cases/:id/bail/order | Court | Issue bail order | Same role as hearing-notice; differentiated by audit-log action, not a separate "Judge" role |

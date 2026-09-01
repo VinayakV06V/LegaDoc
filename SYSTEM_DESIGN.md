@@ -487,7 +487,8 @@ flowchart TD
   separate tenants — easy to accidentally model as separate orgs, which would break the
   cross-tenant RBAC middleware's simple `org_id` check. Case Diary is an append-only running log,
   distinct from a Document upload — conflating the two loses the "running notebook" semantics real
-  investigations need.
+  investigations need. It now routes through the AI Parser for auto-redaction before being visible
+  beyond the assigned IO/SHO, closing what was previously a gap in the flagship redaction feature.
 
 ### Domain 2 — Forensic (FSL / Digital FSL)
 
@@ -642,7 +643,7 @@ flowchart TD
 | GET | /cases/:id | Role-filtered | Fetch case summary + linked resources | — |
 | POST | /cases/:id/assign-io | SHO | Assign investigating officer | Creates CaseAssignment row |
 | POST | /cases/:id/reassign-io | SHO / Admin | Reassign IO mid-case | Logged as its own audit event; EvidenceRequest ownership follows the Case, not the individual IO, so in-flight requests transfer transparently |
-| POST | /cases/:id/case-diary | IO | Append a running case-diary entry | Append-only log (author, text, timestamp) — not a Document upload, a running notebook per case |
+| POST | /cases/:id/case-diary | IO | Append a running case-diary entry | Append-only log (author, text, timestamp) — not a Document upload, a running notebook per case; text is routed through the AI Parser for auto-redaction before being visible beyond the assigned IO/SHO |
 | GET | /cases/:id/case-diary | Role-filtered | List case-diary entries | Same visibility rule as the rest of the case file |
 | POST | /cases/:id/evidence-requests | IO | Create request to external org | One row per request — supports parallel N requests |
 | GET | /cases/:id/evidence-requests | IO / relevant Authority | List requests + status | — |
@@ -725,11 +726,11 @@ short-polling a status endpoint is the simplest thing that works.
 | Document hash + chain_status | Chain Worker writes `chain_status`; **Fabric ledger is the actual source of truth for the hash's validity** | API (displays status) | DB holds a *mirror* of confirmation state | Reconciliation job compares DB chain_status against ledger periodically (LATER — manual reconciliation acceptable at MVP scale); admin can force a retry via retry-chain-write |
 | EvidenceRequest status | API, written by IO (create) and Authority (submit) | IO, Prosecutor (for Stage Requirements check) | None | — |
 | BailRecord per stage | API, written by respective role per stage | Court, IO, Defense (own case only) | None | — |
-| Case Diary entries | IO, via `POST /cases/:id/case-diary` | Role-filtered readers of the case | None | Append-only running log, separate from Document uploads |
+| Case Diary entries | IO, via `POST /cases/:id/case-diary` | Role-filtered readers of the case | None | Append-only running log, separate from Document uploads; routed through the AI Parser for auto-redaction before being visible beyond the assigned IO/SHO |
 | CaseAssignment (current IO) | API, written by SHO only | All roles needing to know current IO | None | Updated in place on reassignment; history preserved via audit log |
 | DocumentSchema registry (incl. recognizer mappings) | Admin, via `/admin/document-schemas` and `/admin/document-schemas/:type/recognizers` | AI Parser Worker (reads recognizer config), redaction filter (reads schema on every document read) | None | Changing a schema or recognizer mapping does not retroactively re-tag already-processed documents |
 | Stage Requirements config | Admin, via `/admin/stage-requirements` | Charge-sheet validation logic | None | — |
-| Audit log (incl. AI Parser decisions + corrections) | API, append-only write on every state-changing action, including AI Parser auto-tags and human corrections | Role-filtered readers (aggregate view); full AI-parser entity-level detail is System Admin only | None — blockchain holds only the *hash* of each entry, not a full copy | Immutable by design; audit entries never store the redacted content itself, only metadata about the tagging decision |
+| Audit log (incl. AI Parser decisions + corrections) | API, append-only write on every state-changing action, including AI Parser auto-tags and human corrections | Role-filtered readers (aggregate view); full AI-parser entity-level detail is System Admin only | None — blockchain holds only the *hash* of each entry, not a full copy | Immutable by design; audit entries never store the redacted content itself, only metadata about the tagging decision. Each row also stores `row_hash = hash(prev_row_hash + content)`, an internal chain independent of Fabric that makes deleting or reordering a row detectable |
 | Meta-audit (who read the AI-parser audit trail) | API, append-only write triggered on every `GET /cases/:id/audit-log/ai-parser` | System Admin only | None | Same immutability rule as the audit log itself |
 
 **Rule enforced here**: the blockchain is never treated as a second full copy of anything — it holds
@@ -763,6 +764,31 @@ victim, medical, or investigative data ever leaves Indian government-controlled 
 | Presidio + spaCy (self-hosted) | AI Parser Worker — sensitive-span detection | None — local library/model, no credential at all | Documents fall back to fully-redacted pending manual review (fail-safe, not fail-open) | Manual redact-tag override always available regardless of AI Parser health |
 
 No external SaaS product appears in this table — a strong, simple, and true line for judges.
+
+---
+
+## Security: Encryption, Key Management, Input Validation & Audit Integrity
+
+### Encryption
+- **At rest**: MinIO server-side encryption (AES-256) for all object storage; PostgreSQL with disk-level encryption in production, plus **column-level encryption via pgcrypto** for the highest-sensitivity fields specifically — victim/accused legal names, medical diagnosis text, financial account numbers, and any field a Tier 1 DocumentSchema marks as maximum-sensitivity. This is narrower than whole-DB encryption because it protects those fields even against a compromised read replica or backup, not just a stolen disk.
+- **In transit**: TLS 1.2+ on every connection — Web App↔API, API↔DB, API↔MinIO, Chain Worker↔Fabric (gRPC over TLS) — no exceptions, including internal service-to-service traffic.
+
+### Key management
+- **Dev**: `.env`, gitignored — acceptable only for local development, never the production answer.
+- **Production (LATER, stated now)**: a named secrets manager (HashiCorp Vault or the cloud provider's KMS) holds every Fabric org's MSP private key and every DB/service credential — never committed, never sitting in an env file on a running host.
+- **Revocation runbook**: if an org's Fabric signing identity is suspected compromised — (1) revoke that identity via the Fabric CA immediately, the consortium's other orgs continue unaffected; (2) force-rotate that org's DB service credential; (3) invalidate all currently-issued JWTs for that org (short token TTL makes this self-resolving within minutes even without a revocation list).
+
+### Input validation
+- Every FastAPI endpoint validates its request body against a Pydantic schema before any handler code runs.
+- All database access goes through the ORM's parameterized queries — no raw string-interpolated SQL anywhere, including in free-text fields (Case Diary entries, redact-tag corrections).
+- Free-text fields are output-encoded on render (standard React JSX escaping) to prevent stored XSS from a diary entry or correction note.
+- File uploads are validated by content-sniffed MIME type against the declared type (not filename extension alone), with a per-file size cap enforced before the multipart body is fully accepted.
+
+### Audit log integrity — closing a real gap
+Individual audit-log entries are hash-chained to Fabric, which proves a given action happened and wasn't altered after the fact. That alone doesn't prove no entry was ever *removed* from the sequence by someone with direct database access. **Every `audit_log` row now stores `row_hash = hash(prev_row_hash + this row's content)`**, forming an internal hash chain independent of Fabric — deleting or reordering any row breaks every subsequent row's hash, making tampering with the log's own sequence detectable by a simple integrity check, not just tampering with one entry's content.
+
+### Case Diary now routes through the redaction pipeline — closing a real gap
+Case Diary entries are officer-written free text and, prior to this pass, bypassed OCR and the AI Parser entirely — a diary entry containing a victim's name or a medical detail was never auto-redacted before other roles could read it, directly undercutting the system's flagship feature. **Resolved**: Case Diary text is now submitted to the AI Parser as a lightweight text-tagging job (same Presidio/spaCy pipeline, skipping OCR since there's no image to extract from) before the entry is marked readable by anyone beyond the assigned IO and SHO. The same fail-closed rule applies as everywhere else: if tagging fails, the entry stays visible only to the assigned IO/SHO until it succeeds or is manually reviewed.
 
 ---
 

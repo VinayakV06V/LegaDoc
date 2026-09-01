@@ -1,0 +1,7 @@
+celery==5.4.0
+redis==5.0.8
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+presidio-analyzer==2.2.355
+spacy==3.7.6
+# After install: python -m spacy download en_core_web_lg

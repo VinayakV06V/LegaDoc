@@ -1,0 +1,9 @@
+celery==5.4.0
+redis==5.0.8
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+# Hyperledger Fabric's Python SDK is community-maintained and its PyPI packaging
+# has shifted over time (commonly published as `hfc`). Confirm the current
+# package name/version against https://github.com/hyperledger/fabric-sdk-py
+# before pinning it here — this is exactly the SDK-maturity risk SYSTEM_DESIGN.md
+# flags explicitly for this worker.

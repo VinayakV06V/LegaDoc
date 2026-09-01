@@ -1,12 +1,10 @@
 # System Design — SIH26190 Secure Digital Document Management System
 ## Full Reference: Architecture, Connections, Flows & Domain Views
 
-> **Source of truth**: this document diagrams and explains decisions already made in
-> [`LegaDoc_v2.md`](LegaDoc_v2.md), [`SIH26190_Role_Document_Taxonomy.docx`](SIH26190_Role_Document_Taxonomy.docx),
-> and [`SIH26190_Architecture.pptx`](SIH26190_Architecture.pptx). Nothing here re-litigates those
-> decisions (tiered DocumentSchema, Domestic Violence as demo showcase, all-Python stack, org-vs-role
-> boundary for specialized police units, etc.) — it goes one layer deeper: every connection in the
-> system, every flow end-to-end, and every real-world domain's view into the platform.
+> This is the complete, self-contained system design — architecture, every connection between
+> components, every flow end-to-end, every real-world domain's view into the platform, and the
+> full interface contract, state ownership, environment, and checklist reference behind it. Nothing
+> in this document depends on any other file.
 
 ## Scope
 A multi-organization case management system for law enforcement, forensic, medical, and judicial
@@ -18,7 +16,11 @@ ledger for tamper evidence.
 
 ## Scale tier
 MVP-that-becomes-a-capstone — 1 week to a demoable build, 5-person team, zero external SaaS
-dependencies. Full reasoning in `LegaDoc_v2.md`'s Scale Tier section; unchanged here.
+dependencies. A 5-person team with mixed experience (React, CNN/ML background pivoting to backend
+logic, Java + conceptual Python, general full-stack, one strong pipeline-experienced generalist)
+building toward a judged prototype demo, not live traffic. Every choice below is sized to that
+reality; anything heavier is explicitly deferred with a stated trigger, not built because it looks
+impressive.
 
 ---
 
@@ -123,6 +125,15 @@ C4Container
                         (writes to DB)      (writes tags to DB)   [Hyperledger Fabric — 5 org nodes]
 ```
 
+**Tech-choice rationale (one line each):**
+- **PostgreSQL over NoSQL** — case/document/evidence-request/bail data is deeply relational (foreign keys, joins for stage-requirement checks); relational integrity matters more here than schema flexibility.
+- **Python/FastAPI for the API** — the whole backend is standardized on Python; FastAPI's async support fits the poll-heavy, queue-heavy request patterns in this design and gives request/response validation for free.
+- **Python for the OCR worker** — PaddleOCR is Python-native; no polyglot cost since the whole backend is Python.
+- **Python (fabric-sdk-py) for the Chain Worker, deliberately** — Fabric's most mature SDKs are Node/Java/Go; the Python SDK is community-maintained and less current. Chosen anyway for stack consistency, with the risk explicitly accepted, not overlooked.
+- **Presidio + spaCy NER for the AI Parser, self-hosted** — purpose-built open-source PII/sensitive-span detection (pattern recognizers + a pretrained NER model), not a generative LLM. Needs a one-time human configuration step (map entity types → DocumentSchema fields) instead of training-data collection, which is the realistic path to "fully automatic, self-hosted, no existing trained model" inside a short build window.
+- **Redis/Celery over BullMQ** — with the whole backend in Python, Celery is the natural, officially-supported choice. Three job types (OCR, AI-parse, blockchain-write), each single-producer/single-consumer — exactly right-sized, no Kafka-scale event streaming needed.
+- **MinIO/S3-compatible object storage over storing files in Postgres** — documents and binary evidence (CCTV, device dumps) don't belong in relational rows; object storage with DB-held references is the standard, correct split.
+
 ---
 
 ## System Connections — Usage Reference
@@ -172,7 +183,7 @@ flowchart LR
 |---|---|---|---|---|
 | 1 | Roles → Web App | Every human interaction with the system starts here — the one entry point for 10 different role types | Client-side only; a compromised browser session is a compromised role until the JWT expires | React SPA, HTTPS |
 | 2 | Web App → API | Every read/write goes through one enforcement point (RBAC + redaction), never direct DB access from the browser | If the API is down, the whole system is down — no offline mode, no read-through cache at MVP scale | REST/JSON, JWT (role + org claim) |
-| 3 | API → DB | Source of truth for every structured fact in the system (cases, documents metadata, evidence, bail, config, audit) | Single real point of failure in this design (per `LegaDoc_v2.md`'s dependency table) — no read replica at MVP scale | PostgreSQL, SQL over service credential |
+| 3 | API → DB | Source of truth for every structured fact in the system (cases, documents metadata, evidence, bail, config, audit) | Single real point of failure in this design — no read replica at MVP scale | PostgreSQL, SQL over service credential |
 | 4 | API → Object Storage | Raw files (scans, CCTV, device dumps) don't belong in relational rows — keeps DB lean and lets large binaries scale independently | Upload/fetch failures are surfaced to the user directly; no server-side retry beyond client-triggered re-upload | MinIO (S3-compatible), TLS, per-org scoped path |
 | 5 | API → Job Queue | Decouples slow work (OCR, AI-tagging, blockchain writes) from the request/response cycle — the user gets a 202, not a multi-second wait | Fire-and-forget enqueue: if Redis is down, jobs are never queued (not silently lost, but visibly failed at enqueue time, not hidden) | Redis + Celery, idempotency key in every job payload |
 | 6 | Queue → OCR Worker | Text-bearing documents need extraction before anything downstream (tagging, redaction) can happen | Retried with backoff; after N failures, dead-lettered + flagged via `GET /documents?status=needs_review` | Celery, PaddleOCR |
@@ -185,9 +196,9 @@ flowchart LR
 | 13 | Chain Worker → DB | Reads the document hash to sign, then writes back `chain_status` (pending/confirmed/failed) | The classic split-brain risk: Fabric confirms but the DB write crashes before recording it — this is exactly why `retry-chain-write` reuses the *original* idempotency key instead of minting a new one | SQL |
 | 14 | Chain Worker → Fabric | The actual tamper-evidence mechanism — a signed hash transaction per document, submitted under the org's own Fabric MSP identity | On repeated endorsement failure, the document is flagged `chain_status=failed` for manual review; there is no inbound webhook from Fabric — confirmation is read back by polling, deliberately, to avoid standing up event-listening infrastructure at MVP scale | Fabric Gateway gRPC, fabric-sdk-py, org signing key |
 
-Full per-arrow sync/async, retry, and volume detail (the compact version of this same table) already
-lives in `LegaDoc_v2.md`'s **Arrow Specifications** section — this table is the "why and how it
-breaks" companion to that one, not a replacement.
+The compact sync/async/retry/volume version of this same table lives in the **Interface Contracts**
+section below, under Arrow Specifications — this table is the "why and how it breaks" companion to
+that one.
 
 ---
 
@@ -587,7 +598,8 @@ flowchart LR
   filtered pass through the normal `/cases` or `/documents/:id` endpoints. That's not extra
   engineering for its own sake — it's the one domain in this system architected to make the
   "someone forgot to apply the redaction filter on this code path" bug class structurally
-  impossible rather than just tested against.
+  impossible rather than just tested against. This role belongs to its own organization — `org = NCRB`,
+  a central body, distinct from Police.
 
 ### Domain 8 — Platform / Admin (Schema Config, AI Parser, Security)
 
@@ -618,37 +630,237 @@ flowchart TD
 
 ## Interface Contracts
 
-Full 36-row endpoint table, arrow specifications, and async pattern decisions already live in
-`LegaDoc_v2.md`'s **Interface Contracts** section — reused here by reference rather than duplicated,
-since nothing about them changed in this pass. The **System Connections — Usage Reference** table
-above is the new material this document adds on top of that endpoint table.
+### Endpoint Table
+
+| Verb | Route | Auth (who) | Purpose | Notes |
+|---|---|---|---|---|
+| POST | /auth/login | Public | Issue session/JWT | — |
+| GET | /orgs/:orgId/users | Org Admin | List an org's users | — |
+| POST | /orgs | System Admin | Onboard external authority org | MVP: admin pre-registration, not self-service |
+| POST | /cases | Duty Officer | Register FIR, create case | Action-shaped, not raw POST — validates crime-type config |
+| GET | /cases | Any authenticated role | List cases, filtered by role/org visibility | Paginated, filterable by crime_type/status |
+| GET | /cases/:id | Role-filtered | Fetch case summary + linked resources | — |
+| POST | /cases/:id/assign-io | SHO | Assign investigating officer | Creates CaseAssignment row |
+| POST | /cases/:id/reassign-io | SHO / Admin | Reassign IO mid-case | Logged as its own audit event; EvidenceRequest ownership follows the Case, not the individual IO, so in-flight requests transfer transparently |
+| POST | /cases/:id/case-diary | IO | Append a running case-diary entry | Append-only log (author, text, timestamp) — not a Document upload, a running notebook per case |
+| GET | /cases/:id/case-diary | Role-filtered | List case-diary entries | Same visibility rule as the rest of the case file |
+| POST | /cases/:id/evidence-requests | IO | Create request to external org | One row per request — supports parallel N requests |
+| GET | /cases/:id/evidence-requests | IO / relevant Authority | List requests + status | — |
+| POST | /evidence-requests/:id/submit | The specific requested Authority | Fulfill request, attach document | Triggers document upload pipeline |
+| POST | /documents | Role permitted for that case/doc-type | Upload document or binary evidence | Multipart; routes to OCR→AI-Parser pipeline or binary pipeline by file type |
+| GET | /documents/:id | Role-filtered | Fetch document | Returns redacted or full view per auto-tagged sensitivity spans + role |
+| GET | /documents/:id/versions | Role-filtered | Version history | Append-only — originals never overwritten |
+| GET | /documents/:id/chain-status | Role-filtered | Poll blockchain confirmation | Short-poll target for Flow 2 |
+| GET | /documents?status=needs_review | Admin / Recording officer | List documents where the AI Parser fell back to fully-redacted after repeated failure | Plain filtered query on the documents table |
+| POST | /documents/:id/retry-chain-write | Admin | Manually re-trigger a stuck chain-write | Reuses the *original* idempotency key, never a fresh one — if Fabric actually confirmed the transaction before the crash, this guarantees the retry can't create a duplicate ledger entry |
+| POST | /documents/:id/redact-tag | Recording officer | Correct/override an AI Parser sensitivity tag | Correction path over the AI Parser's auto-tags, not the primary tagging mechanism |
+| POST | /cases/:id/file-charge-sheet | Prosecutor | Attempt charge sheet filing | Validated against Stage Requirements — 409 if incomplete |
+| POST | /cases/:id/bail/arrest | IO / Police | Record arrest | Starts independent bail track |
+| POST | /cases/:id/bail/application | Defense (submission-only) | File bail application | — |
+| POST | /cases/:id/bail/hearing-notice | Court | Schedule hearing | — |
+| POST | /cases/:id/bail/order | Court | Issue bail order | Same role as hearing-notice; differentiated by audit-log action, not a separate "Judge" role |
+| POST | /cases/:id/bail/surety | Accused (submission-only) | Register surety bond | — |
+| POST | /cases/:id/trial/hearing-notice | Court | Schedule a trial hearing | Mirrors bail's hearing-notice; moves `investigation_status` to `Trial` |
+| POST | /cases/:id/judgment | Court | Record final judgment | Mirrors bail's order pattern; moves `investigation_status` to `Judgment` — closes the state diagram's `Trial → Judgment` transition |
+| GET | /cases/:id/audit-log | Role-filtered | Full or summarized audit trail incl. chain_status | Full for Admin/Court, summarized elsewhere |
+| GET | /cases/:id/audit-log/ai-parser | System Admin only | Full detail of every AI Parser auto-tag decision and every human correction on this case's documents | Deliberately narrower than the general audit log; every read of this endpoint is itself logged (meta-audit); no bulk/cross-case export |
+| GET | /admin/document-schemas | System Admin | Manage field-sensitivity schema registry | Tiered: full field definitions for the ~13 Tier 1+2 types (FIR, MLC, Witness Statement + Domestic Violence showcase set), one generic default profile inherited by the remaining ~40+ of the 57 canonical types |
+| POST | /admin/document-schemas/:type/recognizers | System Admin | Map entity types (name, phone, medical condition, ID number, ...) to a DocumentSchema's sensitivity fields | One-time-per-type config step that drives the AI Parser |
+| GET | /admin/stage-requirements | System Admin | Manage mandatory-document/evidence config per crime type | Drives Flow 3's validation check |
+| GET | /reports/case-metadata | Records / NCRB Analyst | De-identified case metadata only | Backed by a dedicated Postgres view (e.g. `case_metadata_deidentified`) exposing only non-sensitive columns — no separate redaction logic to build or keep in sync |
+
+*(34 endpoints — every route maps to a resource + verb derived mechanically from the case/document/evidence/bail resource model, not invented ad hoc.)*
+
+### Arrow Specifications (every connection in the container diagram)
+
+| From → To | Trigger | Sync/async | Payload | Auth | Failure behavior | Retry & idempotency | Volume (demo scale) |
+|---|---|---|---|---|---|---|---|
+| Web App → API | User action | Sync | REST/JSON per endpoint table | JWT (role + org claim) | Error surfaced to user | N/A (user-initiated) | Low |
+| API → DB | Every request | Sync | SQL | Service credential | 500 to caller, logged | N/A within a request; idempotency keys on state-transition actions | Low |
+| API → Object Storage | Document upload/fetch | Sync | File bytes, S3 API | Service credential, scoped per-org path | Error surfaced; upload retried by client | Client-side retry on network failure | Low |
+| API → Queue | Doc uploaded / doc finalized | Async (fire-and-forget enqueue) | Job payload: doc_id, case_id, org_id, idempotency_key | Internal service credential | Job requeued on worker crash (Celery default, acks-late) | Idempotency key prevents duplicate OCR/AI-parse/hash-write on redelivery | Low |
+| Queue → OCR Worker | Job available | Async | doc_id | Internal | Job retried with backoff; after N failures, dead-letter + manual review flag | Idempotency key = doc_id + version | Low |
+| OCR Worker → Queue | Extraction complete | Async (fire-and-forget enqueue) | doc_id, extracted text ref | Internal | Requeued on worker crash | Idempotency key = doc_id + version | Low |
+| Queue → AI Parser Worker | Job available | Async | doc_id, extracted text ref | Internal | Retried with backoff; after N failures, document falls back to "unreviewed — full redaction" default (fail-safe: hide everything, not expose everything) and flags for manual review | Idempotency key = doc_id + version | Low |
+| Queue → Chain Worker | Job available | Async | doc_id, computed hash | Internal | Retried with backoff (Fabric transaction submission is a known flaky point) | Idempotency key prevents double hash-write for same doc version | Low |
+| Chain Worker → Fabric | Job processing | Async (from the API's perspective) | Signed transaction (doc hash + metadata) | Org's signing key via Fabric MSP identity | On endorsement failure, retry with backoff; on repeated failure, flag doc as chain_status=failed for manual review via retry-chain-write endpoint | Fabric's own transaction ID + our idempotency key together prevent duplicate ledger entries | Low |
+| Web App → API (polling) | Status check after upload | Sync, short-poll | GET request | JWT | Simple retry by client on next poll interval | N/A | Low |
+
+**Third-party arrow — direction of trust**: the only genuinely external system is Hyperledger Fabric,
+and *we* call *it* (Chain Worker holds each org's signing credential, submits outbound). There is no
+inbound webhook from Fabric — confirmation is read back via polling the ledger, deliberately kept
+simple for MVP rather than standing up event-listening infrastructure.
+
+**Fail-safe worth calling out**: if the AI Parser job fails repeatedly, the document defaults to
+**fully redacted** pending manual review, not fully exposed. In a legal-evidence system, failing
+closed (over-hiding) is the safe direction; failing open (under-hiding) is the one that causes real
+harm.
+
+### Async Pattern Decisions (one line per flow)
+
+- **FIR registration**: synchronous — user needs the case number immediately to continue.
+- **Document raw upload acknowledgment**: synchronous (202 Accepted) — but the *processing* (OCR, AI-parse tagging, hash-write) is async; no one should wait on any of it before the UI responds.
+- **OCR/field extraction**: queue + worker — slow, not needed inline; status surfaced via short-poll on `GET /documents/:id`.
+- **AI Parser sensitivity tagging**: queue + worker, chained after OCR completes — runs fully automatically once extraction finishes; document status stays "processing" until tagging completes, since the redaction filter needs tags before any role should read the document.
+- **Blockchain hash-write**: queue + worker, always async, and runs **in parallel** with OCR/AI-parse rather than after — it hashes the raw file bytes in Object Storage, which never change regardless of tagging outcome.
+- **Evidence request fulfillment**: synchronous submit action, which itself triggers the async upload pipeline above.
+- **Charge sheet filing**: synchronous — fast DB-side validation + state transition, no reason to make it async.
+- **Bail and trial/judgment stage actions**: synchronous — same reasoning, fast state transitions.
+
+No WebSockets anywhere in this design — nothing here needs live bidirectional push at MVP scale;
+short-polling a status endpoint is the simplest thing that works.
+
+---
 
 ## State Ownership Map
 
-Reused as-is from `LegaDoc_v2.md` — every piece of state (case core data, investigation/bail status,
-document bytes, structured fields, sensitivity tags, chain_status, evidence requests, bail records,
-case assignment, schema registry, stage requirements, audit log, meta-audit) has exactly one owner.
-No changes in this pass.
+| State | Owner (writes) | Readers | Copies/caches | Invalidation |
+|---|---|---|---|---|
+| Case core data (status, crime_type, court_level) | API → `cases` table | All roles (filtered) | None | Direct read, always current |
+| Investigation status | API → `cases.investigation_status` | All roles (filtered) | None | Full lifecycle: FIR → Evidence Collection → Charge Sheet Ready → Charge Sheet Filed → Trial → Judgment |
+| Bail status | API → `cases.bail_status` | All roles (filtered) | None | Independent of investigation_status — see Flow 4 |
+| Document raw bytes | Object Storage | OCR Worker, API (serving to authorized roles) | None — single copy | — |
+| Document structured fields | OCR Worker → `documents` table | AI Parser Worker, API (redaction filter reads this) | None | Re-extracted only if document is re-uploaded as new version |
+| Document sensitivity tags | AI Parser Worker writes automatically; recording officer can overwrite an individual tag via `redact-tag` | API (redaction filter reads this on every document read) | None | Not retroactive on schema change — new uploads only |
+| Document hash + chain_status | Chain Worker writes `chain_status`; **Fabric ledger is the actual source of truth for the hash's validity** | API (displays status) | DB holds a *mirror* of confirmation state | Reconciliation job compares DB chain_status against ledger periodically (LATER — manual reconciliation acceptable at MVP scale); admin can force a retry via retry-chain-write |
+| EvidenceRequest status | API, written by IO (create) and Authority (submit) | IO, Prosecutor (for Stage Requirements check) | None | — |
+| BailRecord per stage | API, written by respective role per stage | Court, IO, Defense (own case only) | None | — |
+| Case Diary entries | IO, via `POST /cases/:id/case-diary` | Role-filtered readers of the case | None | Append-only running log, separate from Document uploads |
+| CaseAssignment (current IO) | API, written by SHO only | All roles needing to know current IO | None | Updated in place on reassignment; history preserved via audit log |
+| DocumentSchema registry (incl. recognizer mappings) | Admin, via `/admin/document-schemas` and `/admin/document-schemas/:type/recognizers` | AI Parser Worker (reads recognizer config), redaction filter (reads schema on every document read) | None | Changing a schema or recognizer mapping does not retroactively re-tag already-processed documents |
+| Stage Requirements config | Admin, via `/admin/stage-requirements` | Charge-sheet validation logic | None | — |
+| Audit log (incl. AI Parser decisions + corrections) | API, append-only write on every state-changing action, including AI Parser auto-tags and human corrections | Role-filtered readers (aggregate view); full AI-parser entity-level detail is System Admin only | None — blockchain holds only the *hash* of each entry, not a full copy | Immutable by design; audit entries never store the redacted content itself, only metadata about the tagging decision |
+| Meta-audit (who read the AI-parser audit trail) | API, append-only write triggered on every `GET /cases/:id/audit-log/ai-parser` | System Admin only | None | Same immutability rule as the audit log itself |
+
+**Rule enforced here**: the blockchain is never treated as a second full copy of anything — it holds
+hashes only. Postgres is the single owner of all actual content; Fabric is the tamper-evidence layer
+riding on top, not a parallel data store.
+
+---
 
 ## Environments
 
-Reused as-is from `LegaDoc_v2.md` — local/dev, demo (judging day), production (stated, not built).
-Zero external SaaS dependencies confirmed intact after the AI Parser addition (Presidio + spaCy run
-entirely self-hosted).
+| Env | DB | Fabric network | Object storage | Third parties real/mocked | Secrets source | Deliberate differences |
+|---|---|---|---|---|---|---|
+| local/dev | Dockerized Postgres | Local Fabric test network (fabric-samples-style, 5 peer containers) | MinIO container | N/A — fully self-hosted, no external SaaS dependency | `.env`, gitignored | Seed data (synthetic cases) loaded on startup; AI Parser Worker container bundles its spaCy model at build time (no runtime download) |
+| demo (judging day) | Same dockerized Postgres, seeded with the synthetic 15-case dataset | Same local Fabric network, now treated as "the" network for the demo | Same MinIO | Still fully self-hosted | `.env` on demo machine | No seed-reset route exposed once demo data is finalized |
+| production (stated, not built) | Managed Postgres | Real multi-org Fabric consortium across actual agency infrastructure | Managed S3-compatible storage, data-localized per government requirements | Real org onboarding process (not admin pre-registration) | Platform secret store / HSM for signing keys | Named as the LATER target throughout this doc — not built now |
+
+**Worth stating plainly in the pitch**: this system has genuinely **zero external SaaS dependencies**
+in its architecture — no third-party API calls at all in the core pipeline (no LLM API, no external
+maps/payment/identity provider). Everything runs self-hosted, including the AI Parser (Presidio +
+spaCy). That's a real, defensible data-sovereignty claim for a government legal-records system: no
+victim, medical, or investigative data ever leaves Indian government-controlled infrastructure.
+
+### Third-Party Dependency Inventory
+
+| Dependency | Used for | Credential location | Blast radius if down | Fallback |
+|---|---|---|---|---|
+| Hyperledger Fabric (self-hosted) | Tamper-evident hash ledger | Org-specific MSP identity, stored per-service | Documents still store/serve normally; only chain-confirmation badge shows "pending" | Retry with backoff, or admin triggers manual retry-chain-write |
+| PostgreSQL (self-hosted) | All structured data | DB service credential | Full outage — this is the single real point of failure in the design | Standard DB backup/restore; no external mitigation needed at MVP scale |
+| MinIO (self-hosted) | File/evidence storage | Service credential | Document uploads/reads fail | Same tier as DB — self-hosted, backed up |
+| Redis/Celery (self-hosted) | Job queue | Internal | OCR, AI-parse, and hash-write jobs pause, resume once restored | Jobs persist in Redis broker, not lost, just delayed |
+| Presidio + spaCy (self-hosted) | AI Parser Worker — sensitive-span detection | None — local library/model, no credential at all | Documents fall back to fully-redacted pending manual review (fail-safe, not fail-open) | Manual redact-tag override always available regardless of AI Parser health |
+
+No external SaaS product appears in this table — a strong, simple, and true line for judges.
+
+---
 
 ## Domain Overlays Applied
 
-Reused as-is from `LegaDoc_v2.md` — B2B SaaS multi-tenant overlay partially adapted (org/role model,
-tenant context propagation); Fintech/Trading/AI-agent overlays explicitly not applicable, with the
-AI-agent non-applicability now stated precisely (classical NLP via Presidio/spaCy, not a generative
-model or LLM agent).
+None of the standard domain overlays (B2B SaaS, Fintech, Trading/quant, AI-agent) is a precise match
+for a multi-agency government legal-records system — worth being honest about that rather than
+forcing a fit.
+
+**Partially adapted: B2B SaaS multi-tenant overlay**, because Police/FSL/Hospital/Bank/Telecom/RTO/Court
+function analogously to separate tenant organizations, each with their own users and a role model.
+
+| Adapted item | Application here | Rationale |
+|---|---|---|
+| Tenant context propagation | Every request carries `org_id` + `role` as JWT claims, checked via one consistent middleware — not reinvented per endpoint | Prevents the classic cross-tenant leak failure mode this overlay warns about; directly relevant since an FSL user must never see a Bank's evidence requests, etc. |
+| Org/user model | Users belong to exactly one Organization; role model (Duty Officer, SHO, IO, specialized police units, Authority-staff, Prosecutor, Court, Defense, Admin, Records/NCRB Analyst) designed as first-class tables now | Bolting multi-org support on later would be a real migration cost — designed in from day one |
+
+**Explicitly not applicable:**
+- **Fintech overlay** — there is no money-movement ledger in this system's core scope. The "ledger-shaped storage" instinct is satisfied instead by the *audit log's* append-only design.
+- **Trading/quant overlay** — no signal generation, no execution, not applicable.
+- **AI-agent overlay** — not applicable, precisely stated: the AI Parser is classical NLP (pattern recognizers + a pretrained NER model via Presidio/spaCy), not a generative model or an LLM agent. There is no prompt-assembly step, no LLM API call, no token-budget concern, no autonomous decision-making beyond "does this span match a configured entity pattern." This is closer to a smart regex than an agent — worth being precise about this distinction with judges.
+
+---
 
 ## Concepts Checklist
 
-NOW / LATER / WATCHLIST tables reused as-is from `LegaDoc_v2.md`, including every addition from this
-design's review sessions (Celery over BullMQ, AI Parser Worker, tiered DocumentSchema coverage,
-retry-chain-write idempotency, trial/judgment endpoints, Case Diary, needs-review queue,
-Records/NCRB data path, AI Parser audit trail).
+### NOW
+
+| Category | Choice | Rationale |
+|---|---|---|
+| Containerization (Docker) | Yes, every service | Fabric's own setup assumes containerized peers |
+| Docker Compose | Yes | Multiple local dependencies (Postgres, Redis, MinIO, Fabric peers, AI Parser's model files) |
+| Primary DB | PostgreSQL | Deeply relational data (case↔document↔evidence-request↔bail relationships, stage-requirement joins) |
+| Indexes | On `case_number`, `crime_type`, `status`, `org_id` | Real queries exist from day one (case search, role-filtered listing) |
+| Object storage | MinIO (S3-compatible) | Any document/binary-evidence upload needs this |
+| Queue | Redis + Celery | Whole backend is Python; Celery is the mature, officially-supported choice |
+| AI Parser Worker | Self-hosted Presidio + spaCy NER, config-driven per DocumentSchema | Fully-automatic sensitive-span detection, no external API |
+| DocumentSchema coverage | Tiered: 3 full-custom (FIR, MLC, Witness Statement) + ~10 full-custom (Domestic Violence showcase set + Bail Lifecycle) + 1 generic default profile inherited by the remaining ~40+ of the 57 canonical types | Fits a short build window while still giving every one of the 57 types a schema |
+| AI Parser recognizer-mapping owner | ML-background teammate | Domain-knowledge-heavy config work; needs direct access to whoever understands the legal/medical field semantics |
+| Retry-chain-write admin action | Yes, dedicated endpoint | Demo-safety net for a Chain Worker crash mid-write; reuses the original idempotency key |
+| Trial/Judgment endpoints | Yes | Closes the state diagram's `Trial → Judgment` transition |
+| Case Diary | Yes | Named in the Context diagram and present in every one of the 15 workflows' document lists |
+| Needs-review queue | Yes, `GET /documents?status=needs_review` | Gives the AI Parser's and OCR's "manual review" fail-safes somewhere to actually surface |
+| Records/NCRB Analyst data path | Dedicated de-identified Postgres view, not new redaction logic | Keeps this role's access mechanically separate from the main redaction filter |
+| AI Parser audit trail | Every auto-tag + correction logged, hash-chained; full entity-level detail is System Admin only; reads of that detail are themselves logged (meta-audit) | Answers "can we prove what the AI did and who looked at it" |
+| Firewall / default-deny | Yes, even for demo | No exceptions |
+| HTTPS/TLS | Yes, no exceptions | Same |
+| CI/CD pipeline | Lightweight (GitHub Actions: run tests on push) | 5-person team committing in parallel benefits from catching breakage early |
+| Git branching strategy | Trunk-based, short-lived feature branches | Decided now so it isn't improvised mid-build |
+| Code review | Lightweight peer check before merge | Real value even at hackathon pace |
+| Rate limiting | Basic, at API middleware | External orgs are calling in |
+| Error logging | Structured logs to stdout/console | Sufficient for demo; real sink is a LATER concern |
+| Retry/circuit-breaker on Chain Worker | Yes, exponential backoff on Fabric transaction submission, plus manual retry endpoint | Known real failure point, has both automatic and manual recovery |
+| Fail-safe on AI Parser failure | Document defaults to fully-redacted, not fully-exposed, on repeated tagging failure | Legal-evidence system: failing closed is the safe direction |
+| Encryption at rest | Yes, on Object Storage and DB | Non-negotiable given victim PII content |
+| Availability target (informal) | "Must stay up through the judging window; brief downtime outside it acceptable" | Cheap to state, focuses effort correctly |
+| Observability (basic) | Structured logs + simple request/error counters | Enough for a demo; full APM is unjustified overhead |
+| Scheduled jobs | None required at MVP | See LATER — evidence-request reminders deferred |
+| Third-party dependency inventory | Table above | Doubles as the "no external SaaS" pitch point |
+| Cost estimate | Near-zero — everything self-hosted/open-source; only real cost is compute during the build/demo window | Worth stating plainly, it's a strength |
+| Testing priority | Auth/RBAC tests first, then AI Parser tagging accuracy + redaction-filter tests, then charge-sheet Stage Requirements validation logic | Exactly what judges will probe hardest |
+| RTO/RPO (informal) | "Acceptable to lose in-progress demo state; not acceptable to lose a blockchain-confirmed record" | Good pitch line — confirmed records have a fundamentally different resilience story than working state |
+| Accessibility baseline | Semantic HTML, alt text | Costs nothing to start right |
+
+### LATER (path kept open, not built)
+
+| Category | Why deferred | Trigger to build it |
+|---|---|---|
+| Evidence-request reminder/escalation jobs | Legal-process nuance beyond pure MVP technical scope | Real deployment beyond demo, or if judges specifically probe for it |
+| Caching layer (Redis for reads, not just queue) | No expensive/repeated read pattern exists yet at demo scale | If dashboard/search load grows meaningfully |
+| Chain-status reconciliation job (automated) | Manual reconciliation + manual retry endpoint are acceptable at MVP scale | Before any real multi-org production pilot |
+| Automated recognizer-accuracy tuning / active learning for the AI Parser | Out of scope for a short build window; manual recognizer config + human override is the right-sized MVP answer | Real deployment stage, once there's volume of officer corrections to learn from |
+| API versioning scheme | No external consumer beyond the frontend exists yet | First external consumer (e.g., an e-Courts/CCTNS integration) |
+| Self-service org onboarding | Admin pre-registration is sufficient and safer for a demo | Real deployment needing many orgs to onboard without direct involvement |
+| Distributed tracing / full APM | Structured logs are enough at this scale and team size | More than 2-3 services genuinely need cross-service trace correlation |
+| Load testing | No real traffic expected | Before any pilot deployment with actual usage |
+| Formal DR runbook | Backup strategy (Postgres point-in-time recovery) is enough for now | Real deployment stage |
+| Cross-case evidence linking | A Document belongs to one Case; real serial-crime evidence sometimes spans two | If organized/serial-crime cases become a demonstrated priority |
+| Search / full-text indexing across cases | No expensive query pattern exists yet at demo scale | If case volume grows past direct case-number lookup being sufficient |
+| Offline-capable client (local write-ahead queue) | Demo runs on a controlled connection | Real deployment in low-connectivity police stations |
+| Multi-language OCR/NER (PaddleOCR and Presidio both support it) | English is sufficient for the demo showcase | Real deployment across non-English-primary states |
+| Victim-facing case-status lookup | Not part of the officer-facing demo path | If citizen-transparency becomes a stated priority |
+
+### WATCHLIST (explicit non-decision)
+
+| Category | Why skipped | Revisit trigger |
+|---|---|---|
+| Kubernetes | Team of 5, no ops capacity, short build window — this would actively slow the team down | Never at this project's current scope; revisit only if this became a genuinely funded multi-year deployment |
+| Kafka | Three simple job types with single producer/consumer each — Celery is correctly sized | Only if genuine multi-consumer event streaming becomes necessary |
+| WebSockets | No real-time bidirectional need identified anywhere in the 15-case workflow data | If a live "war room" collaborative case view became a real requirement |
+| CDN | No public read-heavy content — this is an internal, authenticated system | Never expected to apply to this system's nature |
+| Load balancer | Single instance sufficient for demo | Multi-instance deploy, a production-stage concern |
+| Sharding/partitioning | Nowhere near the data volume that would justify this | 10x+ current design assumptions, genuinely production scale |
+| Full WCAG accessibility audit | Baseline only is right-sized for MVP | Production deployment stage |
+| Larger/fine-tuned NER model for the AI Parser | Off-the-shelf spaCy pretrained model is enough to demo the mechanism | If this becomes a real pilot deployment where false-negative redaction has actual legal consequences |
+| Mobile native app | Web-first is sufficient to demo the mechanism | If field-use by officers away from a desk becomes a demonstrated priority |
+
+---
 
 ## Open Questions
 
@@ -659,27 +871,32 @@ Records/NCRB data path, AI Parser audit trail).
    source taxonomy (some legally load-bearing). Doesn't block the Domestic Violence demo; a real gap
    if judges ask about other crime types.
 
-Everything else in this document and in `LegaDoc_v2.md` is confirmed and buildable as-is.
+Everything else in this document is confirmed and buildable as-is.
 
 ## Build Prompt Seed
 
 > Building a multi-organization criminal case management system (Python/FastAPI API, React
 > frontend, PostgreSQL, Redis+Celery queue, MinIO object storage, Python/PaddleOCR worker,
 > Python/Presidio+spaCy AI Parser worker, Python fabric-sdk-py Chain Worker against a 5-node
-> Hyperledger Fabric network). The repository already has a blank baseline scaffold matching this
-> container diagram (`api/`, `workers/ocr_worker/`, `workers/ai_parser_worker/`,
-> `workers/chain_worker/`, `web/`, `fabric-network/`, `scripts/`, `db/migrations/`) — fill it in
-> against `LegaDoc_v2.md`'s Interface Contracts and this document's System Connections table. First
-> milestone unchanged from prior guidance: stand up the Fabric test network and confirm the Python
-> Chain Worker can submit and confirm one signed hash transaction end-to-end, in isolation, before
-> wiring the rest of the pipeline around it — this remains the highest-setup-risk component in the
-> system.
+> Hyperledger Fabric network). Core resources: Organization, User, Case, Document (versioned, never
+> overwritten), EvidenceRequest (N parallel requests per case with an AND-join gate before
+> charge-sheet filing), BailRecord (tracks independently of investigation status), CaseDiaryEntry
+> (append-only running log), DocumentSchema (tiered field-level sensitivity registry + AI Parser
+> recognizer mappings), StageRequirements (config-driven mandatory-document rules per crime type),
+> and an append-only AuditLog (hash-chained to Fabric, including AI Parser decisions and a
+> meta-audit of who reads them). Build the folder structure to match the Container Diagram above
+> (`api/`, `workers/ocr_worker/`, `workers/ai_parser_worker/`, `workers/chain_worker/`, `web/`,
+> `fabric-network/`, `scripts/`, `db/migrations/`) and implement against the Interface Contracts and
+> System Connections tables above. First milestone: stand up the Fabric test network and confirm
+> the Python Chain Worker can submit and confirm one signed hash transaction end-to-end, in
+> isolation, before wiring the rest of the pipeline around it — this is the highest-setup-risk
+> component in the system.
 
 ---
 
 ## Review Gate
 
-This document is additive to `LegaDoc_v2.md`, not a replacement — it adds the System Connections
-usage reference, per-flow diagrams for Trial/Judgment and the AI Parser audit trail (neither had a
-dedicated diagram before), and the eight domain views. The two open questions above are the only
-items still needing your team's explicit call before treating the full design as final.
+This document is self-contained and complete: architecture, every connection between components,
+every flow end-to-end, every domain's view into the platform, the full interface contract, state
+ownership, environment, and checklist reference all live here. The two open questions above are the
+only items still needing the team's explicit call before treating the full design as final.

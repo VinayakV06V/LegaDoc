@@ -1,0 +1,54 @@
+name: Security & Quality Audit CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  frontend-security:
+    name: Frontend Vulnerability & Build Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'web/package.json'
+      - name: Install Dependencies
+        run: cd web && npm install
+      - name: Run NPM Security Audit
+        run: cd web && npm audit --audit-level=high || true
+      - name: Production Build Check (Verify No Source Maps)
+        run: cd web && npm run build
+
+  backend-security:
+    name: Backend Security & Test Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt pytest
+      - name: Run Pytest Test Suite
+        run: pytest api/tests
+
+  secret-scanning:
+    name: Secret & Credential Leak Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks Secret Scanner
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

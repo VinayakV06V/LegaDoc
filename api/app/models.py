@@ -10,7 +10,7 @@ import enum
 import uuid
 
 from sqlalchemy import (
-    Column, String, Integer, Boolean, ForeignKey, DateTime, Text, JSON, Enum, func
+    Column, String, Integer, Boolean, ForeignKey, DateTime, Text, JSON, Enum, func, Table
 )
 from app.db_types import GUID
 from sqlalchemy.orm import relationship
@@ -20,6 +20,36 @@ from app.database import Base
 
 def uuid_pk():
     return Column(GUID(), primary_key=True, default=uuid.uuid4)
+
+
+role_permissions = Table(
+    "role_permissions",
+    Base.metadata,
+    Column("role_id", GUID(), ForeignKey("roles.id"), primary_key=True),
+    Column("permission_id", GUID(), ForeignKey("permissions.id"), primary_key=True),
+)
+
+
+class Permission(Base):
+    __tablename__ = "permissions"
+    id = uuid_pk()
+    code = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+
+
+class Role(Base):
+    __tablename__ = "roles"
+    id = uuid_pk()
+    code = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    is_system = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    permissions = relationship("Permission", secondary=role_permissions, backref="roles")
+    users = relationship("User", back_populates="role_rel")
 
 
 class Organization(Base):
@@ -37,13 +67,11 @@ class User(Base):
     __tablename__ = "users"
     id = uuid_pk()
     org_id = Column(GUID(), ForeignKey("organizations.id"), nullable=False)
-    # duty_officer | sho | io | women_cell | cyber_cell | narcotics_police | traffic_police |
-    # crime_scene_unit | rescue_team | counselor | authority_staff | prosecutor | court |
-    # defense | config_admin | security_auditor | records_ncrb_analyst
-    # config_admin / security_auditor: split from a single "admin" role — see
-    # SYSTEM_DESIGN.md, Domain 8. One compromised super-admin should never
-    # hold both schema-editing power AND audit-inspection power at once.
     role = Column(String, nullable=False)
+    role_id = Column(GUID(), ForeignKey("roles.id"), nullable=True)
+    service_id = Column(String, nullable=True)  # Government Service ID / Badge ID
+    designation = Column(String, nullable=True)  # Official rank / title
+    language_preference = Column(String, nullable=False, default="en")
     mfa_enabled = Column(Boolean, nullable=False, default=False)  # required for config_admin/security_auditor/court
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
@@ -51,6 +79,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     organization = relationship("Organization", back_populates="users")
+    role_rel = relationship("Role", back_populates="users")
 
 
 class Case(Base):

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr
 
 # ---------- Auth ----------
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str  # Official email or Government Service ID / Badge Number
     password: str
 
 
@@ -92,3 +92,72 @@ class RedactTagRequest(BaseModel):
     entity_type: str
     span_start: int
     span_end: int
+
+
+# ---------- User Profile & Authoritative Identity ----------
+class UserProfileResponse(BaseModel):
+    id: UUID
+    name: str
+    email: str
+    service_id: Optional[str] = None
+    designation: Optional[str] = None
+    role: str
+    org_id: UUID
+    org_name: Optional[str] = None
+    org_type: Optional[str] = None
+    language_preference: str = "en"
+    permissions: list[str] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Dynamic Role & Permission Management ----------
+class PermissionResponse(BaseModel):
+    id: UUID
+    code: str
+    name: str
+    category: str
+    description: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoleResponse(BaseModel):
+    id: UUID
+    code: str
+    name: str
+    description: Optional[str] = None
+    is_system: bool
+    permission_codes: list[str] = []
+    user_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoleCreateRequest(BaseModel):
+    code: str
+    name: str
+    description: Optional[str] = None
+    permission_codes: list[str] = []
+
+
+class RoleUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    permission_codes: Optional[list[str]] = None
+
+
+class AssignRoleRequest(BaseModel):
+    role_code: str
+
+
+class UserSummaryResponse(BaseModel):
+    id: UUID
+    name: str
+    email: str
+    service_id: Optional[str] = None
+    designation: Optional[str] = None
+    role: str
+    org_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)

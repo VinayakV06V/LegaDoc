@@ -39,8 +39,12 @@ class User(Base):
     org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
     # duty_officer | sho | io | women_cell | cyber_cell | narcotics_police | traffic_police |
     # crime_scene_unit | rescue_team | counselor | authority_staff | prosecutor | court |
-    # defense | admin | records_ncrb_analyst  — see SYSTEM_DESIGN.md Role & Authority Taxonomy
+    # defense | config_admin | security_auditor | records_ncrb_analyst
+    # config_admin / security_auditor: split from a single "admin" role — see
+    # SYSTEM_DESIGN.md, Domain 8. One compromised super-admin should never
+    # hold both schema-editing power AND audit-inspection power at once.
     role = Column(String, nullable=False)
+    mfa_enabled = Column(Boolean, nullable=False, default=False)  # required for config_admin/security_auditor/court
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
     hashed_password = Column(String, nullable=False)
@@ -77,10 +81,14 @@ class Document(Base):
     case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
     doc_type = Column(String, nullable=False)  # one of the 57 canonical types
     version = Column(Integer, nullable=False, default=1)  # append-only — never overwritten
-    storage_path = Column(String, nullable=False)  # MinIO object key
+    storage_path = Column(String, nullable=False)  # MinIO key: {org_id}/{case_id}/{doc_id}/v{version}
+    raw_text = Column(Text, nullable=True)  # OCR output — the AI Parser has nothing to tag without this
+    ocr_engine = Column(String, nullable=True)  # "paddleocr" | "tesseract_fallback"
     doc_hash = Column(String, nullable=True)  # set once computed, before Chain Worker signs it
     status = Column(String, nullable=False, default="processing")  # processing | ready | needs_review
     chain_status = Column(String, nullable=False, default="pending")  # pending | confirmed | failed
+    schema_version = Column(Integer, nullable=False, default=1)  # which DocumentSchema revision tagged this
+    retention_legal_hold = Column(Boolean, nullable=False, default=False)  # blocks any future deletion/archival
     uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -93,7 +101,12 @@ class DocumentSensitivityTag(Base):
     entity_type = Column(String, nullable=False)  # e.g. PERSON, PHONE_NUMBER, MEDICAL_CONDITION
     span_start = Column(Integer, nullable=False)
     span_end = Column(Integer, nullable=False)
-    confidence = Column(Integer, nullable=True)  # 0-100, null for a human correction
+    # 0-100 (Presidio returns 0.0-1.0 float — convert via int(round(score * 100))
+    # before insert, never store the raw float). Null for a human correction.
+    # Anything below the confidence threshold (default 70) must be auto-flagged
+    # for manual review even when tagging technically "succeeded" — see
+    # SYSTEM_DESIGN.md, AI Parser fail-safe rule.
+    confidence = Column(Integer, nullable=True)
     source = Column(String, nullable=False, default="ai_parser")  # ai_parser | officer_correction
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -169,6 +182,14 @@ class AuditLog(Base):
     independent of Fabric, so deleting/reordering a row is detectable even
     though each individual entry is also separately hash-chained to Fabric.
     See SYSTEM_DESIGN.md, "Audit log integrity — closing a real gap".
+
+    CONCURRENCY WARNING: the API and multiple Celery workers all append to
+    this table. Two writers reading the same prev_hash at once and both
+    appending forks the chain silently. Every write MUST take
+    `pg_advisory_xact_lock(<a fixed key>)` for the duration of the
+    read-prev-hash + insert-new-row transaction, serializing all appends
+    across every process. This is not optional — an unserialized hash chain
+    is a broken tamper-evidence guarantee, not a working one.
     """
     __tablename__ = "audit_log"
     id = uuid_pk()

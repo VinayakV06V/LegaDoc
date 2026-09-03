@@ -10,9 +10,23 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Core service
     ENV: str = "local"
+    # Must be a 256-bit high-entropy value in every real env — never reuse
+    # the local default. A short access-token TTL is the actual revocation
+    # mechanism here; pair it with a longer-lived refresh token rather than
+    # extending this.
     JWT_SECRET: str = "change-me-in-every-env-except-local"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 30
+    JWT_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # A compromised access token still works until it expires unless you
+    # check it against a denylist. TODO once real auth is built: on
+    # logout/suspected-compromise, write the token's JTI to this Redis set
+    # with a TTL matching its remaining lifetime; reject any token whose JTI
+    # is present. Skipped for the baseline since a 15-min TTL alone already
+    # bounds the damage window.
+    TOKEN_REVOCATION_REDIS_DB: int = 2
+    LOGIN_RATE_LIMIT: str = "10/minute"  # per IP, on /auth/login specifically
+    AUDIT_LOG_AI_PARSER_RATE_LIMIT: str = "20/minute"  # per user — the most sensitive read path in the system
 
     # Database
     DATABASE_URL: str = "postgresql://postgres:postgres@db:5432/legadoc"

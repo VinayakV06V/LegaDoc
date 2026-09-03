@@ -39,7 +39,7 @@ def get_current_claims(token: str = Depends(oauth2_scheme)) -> dict:
 
 
 def require_role(*allowed_roles: str):
-    """FastAPI dependency factory: Depends(require_role("sho", "admin")).
+    """FastAPI dependency factory: Depends(require_role("sho", "config_admin")).
     Org-scoping (does this claim's org_id match the resource being touched) is
     each router's own responsibility on top of this — role alone isn't enough
     for anything that reads/writes a specific case or org's data.

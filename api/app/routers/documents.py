@@ -23,13 +23,15 @@ def upload_document(claims: dict = Depends(get_current_claims)):
 @router.get("")
 def list_documents(
     status_filter: Optional[str] = Query(default=None, alias="status"),
-    claims: dict = Depends(require_role("admin", "io")),
+    claims: dict = Depends(require_role("config_admin", "io")),
 ):
-    """GET /documents?status=needs_review — Admin / Investigating Officer.
-    List documents where the AI Parser fell back to fully-redacted after
-    repeated failure. Plain filtered query on the documents table. An IO
-    should only see this for their own assigned cases — filter by
+    """GET /documents?status=needs_review — Config Admin / Investigating
+    Officer. List documents where the AI Parser fell back to fully-redacted
+    after repeated failure. Plain filtered query on the documents table. An
+    IO should only see this for their own assigned cases — filter by
     CaseAssignment in the implementation, require_role alone isn't enough.
+    Surface age + count on this queue in the UI — a stuck backlog that's
+    invisible is as bad as no fail-safe at all.
     """
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
 
@@ -56,11 +58,13 @@ def get_chain_status(document_id: str, claims: dict = Depends(get_current_claims
 
 
 @router.post("/{document_id}/retry-chain-write")
-def retry_chain_write(document_id: str, claims: dict = Depends(require_role("admin"))):
-    """POST /documents/:id/retry-chain-write — Admin. Manually re-trigger a
-    stuck chain-write. MUST reuse the original idempotency key from the failed
-    attempt, never mint a new one — if Fabric actually confirmed the
-    transaction before the crash, this guarantees no duplicate ledger entry.
+def retry_chain_write(document_id: str, claims: dict = Depends(require_role("config_admin"))):
+    """POST /documents/:id/retry-chain-write — Config Admin. Manually
+    re-trigger a stuck chain-write. MUST reuse the original idempotency key
+    from the failed attempt, never mint a new one — if Fabric actually
+    confirmed the transaction before the crash, this guarantees no duplicate
+    ledger entry. This is one of the "riskiest actions" flagged for
+    second-person confirmation before it fires in a real deployment.
     """
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
 

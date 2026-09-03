@@ -37,7 +37,7 @@ def assign_io(case_id: str, claims: dict = Depends(require_role("sho"))):
 
 
 @router.post("/{case_id}/reassign-io")
-def reassign_io(case_id: str, claims: dict = Depends(require_role("sho", "admin"))):
+def reassign_io(case_id: str, claims: dict = Depends(require_role("sho", "config_admin"))):
     """POST /cases/:id/reassign-io — SHO / Admin. Reassign IO mid-case.
     Logged as its own audit event. EvidenceRequest ownership follows the
     Case, not the individual IO, so in-flight requests transfer transparently.

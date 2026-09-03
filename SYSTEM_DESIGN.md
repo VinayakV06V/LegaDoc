@@ -40,7 +40,8 @@ C4Context
     Person(prosecutor, "Public Prosecutor", "Files charge sheet")
     Person(court, "Court", "Hearings, bail orders, trial, judgment")
     Person(defense, "Defense / Accused", "Submission-only: bail application, surety bond")
-    Person(admin, "System Admin", "Onboards orgs, manages schemas, AI Parser config")
+    Person(admin, "Config Admin", "Onboards orgs, manages schemas, AI Parser config, chain recovery")
+    Person(auditor, "Security Auditor", "Read-only: full AI Parser audit trail")
     Person(analyst, "Records / NCRB Analyst", "Read-only: de-identified case metadata")
 
     System(dms, "Secure Digital DMS", "Case, document, evidence, bail, and audit management")
@@ -55,6 +56,7 @@ C4Context
     Rel(court, dms, "Bail orders, trial, judgment", "Web")
     Rel(defense, dms, "Submits bail documents", "Web (submission-only)")
     Rel(admin, dms, "Configures schemas, onboards orgs", "Web (admin)")
+    Rel(auditor, dms, "Reads AI Parser audit trail", "Web (audit view)")
     Rel(analyst, dms, "Reads de-identified metadata", "Web (reporting view)")
     Rel(dms, fabric, "Writes signed document hashes", "Fabric SDK")
 ```
@@ -69,7 +71,8 @@ C4Context
 [Prosecutor] ─┤
 [Court] ─┤
 [Defense/Accused] ─┤
-[Admin] ─┤
+[Config Admin] ─┤
+[Security Auditor] ─┤
 [Records/NCRB Analyst] ─┘ (read-only, de-identified)
 ```
 
@@ -186,12 +189,12 @@ flowchart LR
 | 3 | API → DB | Source of truth for every structured fact in the system (cases, documents metadata, evidence, bail, config, audit) | Single real point of failure in this design — no read replica at MVP scale | PostgreSQL, SQL over service credential |
 | 4 | API → Object Storage | Raw files (scans, CCTV, device dumps) don't belong in relational rows — keeps DB lean and lets large binaries scale independently | Upload/fetch failures are surfaced to the user directly; no server-side retry beyond client-triggered re-upload | MinIO (S3-compatible), TLS, per-org scoped path |
 | 5 | API → Job Queue | Decouples slow work (OCR, AI-tagging, blockchain writes) from the request/response cycle — the user gets a 202, not a multi-second wait | Fire-and-forget enqueue: if Redis is down, jobs are never queued (not silently lost, but visibly failed at enqueue time, not hidden) | Redis + Celery, idempotency key in every job payload |
-| 6 | Queue → OCR Worker | Text-bearing documents need extraction before anything downstream (tagging, redaction) can happen | Retried with backoff; after N failures, dead-lettered + flagged via `GET /documents?status=needs_review` | Celery, PaddleOCR |
+| 6 | Queue → OCR Worker | Text-bearing documents need extraction before anything downstream (tagging, redaction) can happen | Retried with backoff; on a PaddleOCR engine failure, falls back to Tesseract before giving up; after N failures on both, dead-lettered + flagged via `GET /documents?status=needs_review` | Celery, PaddleOCR (primary), Tesseract (fallback only) |
 | 7 | Queue → AI Parser Worker | Delivers the AI-parse job the OCR worker enqueues — this is the automatic-redaction step | On repeated failure, **fails closed**: document defaults to fully redacted, not fully exposed, and flags for review — the one failure mode in this system deliberately designed to be safe rather than convenient | Celery, Presidio + spaCy NER |
 | 8 | Queue → Chain Worker | Delivers the hash-write job — runs independently of the OCR/AI-parse track since it only needs the raw file bytes, which never change | Fabric transaction submission is this system's single most flaky integration point (community-maintained Python SDK) — retried with backoff, and has a manual `retry-chain-write` admin escape hatch | Celery, fabric-sdk-py |
-| 9 | OCR Worker → DB | Persists extracted structured fields so the AI Parser and the redaction filter both have something to read | Re-extraction only happens if the document is re-uploaded as a new version — an OCR mistake on v1 doesn't silently self-correct | SQL |
+| 9 | OCR Worker → DB | Persists `raw_text` plus extracted structured fields — the AI Parser literally has nothing to tag without this write landing first | Re-extraction only happens if the document is re-uploaded as a new version — an OCR mistake on v1 doesn't silently self-correct | SQL |
 | 10 | OCR Worker → Object Storage | Needs the actual file bytes to run PaddleOCR against | Read-only; a storage outage here just delays extraction, it can't corrupt the stored original | S3 API |
-| 11 | OCR Worker → Job Queue | This is the causal link between extraction finishing and auto-redaction starting — OCR doesn't call the AI Parser directly, it hands off through the same queue | If this enqueue silently failed, a document could sit "extracted but never tagged" indefinitely — worth an explicit test case, not just a hope | Celery |
+| 11 | OCR Worker → Job Queue | This is the causal link between extraction finishing and auto-redaction starting — OCR doesn't call the AI Parser directly, it hands off through the same queue | If this enqueue silently failed, a document could sit "extracted but never tagged" indefinitely with no active worker watching it. **A periodic reconciliation job must flag any document stuck in `status=processing` for more than ~10 minutes** — this is not optional hardening, it's the only thing standing between a silent enqueue failure and a document nobody ever notices is stuck | Celery |
 | 12 | AI Parser → DB | Writes the auto-tagged sensitivity spans (entity type + location + confidence — **never the raw redacted text itself**) | If this write is what fails repeatedly (not just the tagging logic), the fail-closed rule still applies — the document stays "processing," never silently serves an untagged view | SQL |
 | 13 | Chain Worker → DB | Reads the document hash to sign, then writes back `chain_status` (pending/confirmed/failed) | The classic split-brain risk: Fabric confirms but the DB write crashes before recording it — this is exactly why `retry-chain-write` reuses the *original* idempotency key instead of minting a new one | SQL |
 | 14 | Chain Worker → Fabric | The actual tamper-evidence mechanism — a signed hash transaction per document, submitted under the org's own Fabric MSP identity | On repeated endorsement failure, the document is flagged `chain_status=failed` for manual review; there is no inbound webhook from Fabric — confirmation is read back by polling, deliberately, to avoid standing up event-listening infrastructure at MVP scale | Fabric Gateway gRPC, fabric-sdk-py, org signing key |
@@ -296,11 +299,15 @@ uploader.
   nice-to-have.
 - Two independent async tracks means two independent places a document can get "stuck" —
   `chain_status=pending` forever, or `status=processing` forever. Both have a designed recovery
-  path (`retry-chain-write`, and the AI Parser's fail-closed + `needs_review` flag respectively) —
-  neither should ever require a manual DB edit to unstick.
+  path (`retry-chain-write`, a periodic reconciliation job flagging stuck `processing` documents,
+  and the AI Parser's fail-closed + `needs_review` flag respectively) — neither should ever require
+  a manual DB edit to unstick.
+- A tag that "succeeds" at low confidence isn't the same as one worth trusting — any tag below the
+  confidence threshold (70/100) routes the whole document to `needs_review`, same as an outright
+  failure would.
 
-**Tooling**: MinIO (storage), Celery (queue), PaddleOCR (extraction), Presidio + spaCy (tagging),
-fabric-sdk-py (hashing).
+**Tooling**: MinIO (storage), Celery (queue), PaddleOCR with Tesseract as a fallback engine
+(extraction), Presidio + spaCy (tagging), fabric-sdk-py (hashing).
 
 ---
 
@@ -429,16 +436,16 @@ LATER item, not a gap in what's built now.
 ```mermaid
 sequenceDiagram
     participant AI as AI Parser Worker
-    participant Off as Recording Officer
-    participant Adm as System Admin
+    participant IO as Investigating Officer
+    participant SA as Security Auditor
     participant D as DB (audit_log)
 
     AI->>D: auto-tag event (entity type, location, confidence — never the raw text)
-    Off->>D: correction event (old tag → new tag) via redact-tag
-    Note over D: Both hash-chained to Fabric, same as any other state-changing action
+    IO->>D: correction event (old tag → new tag) via redact-tag
+    Note over D: Both hash-chained to Fabric, same as any other state-changing action, under pg_advisory_xact_lock
 
-    Adm->>D: GET /cases/:id/audit-log/ai-parser
-    D-->>Adm: Full entity-level detail for this case
+    SA->>D: GET /cases/:id/audit-log/ai-parser
+    D-->>SA: Full entity-level detail for this case
     D->>D: Meta-audit entry written — who read this, when
 
     Note over D: Every other role reading GET /cases/:id/audit-log sees only an aggregate line
@@ -606,26 +613,31 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Admin[System Admin] -->|POST /orgs| ORG[Onboard org]
-    Admin -->|/admin/document-schemas| SCHEMA[Tiered DocumentSchema registry]
-    Admin -->|/admin/document-schemas/:type/recognizers| REC[AI Parser recognizer mapping]
-    Admin -->|/admin/stage-requirements| STAGE[Mandatory-doc config]
-    Admin -->|/documents/:id/retry-chain-write| RETRY[Manual chain recovery]
-    Admin -->|/cases/:id/audit-log/ai-parser| AUDIT[Full AI-parser detail — Admin only]
+    CA[Config Admin] -->|POST /orgs| ORG[Onboard org]
+    CA -->|/admin/document-schemas| SCHEMA[Tiered DocumentSchema registry]
+    CA -->|/admin/document-schemas/:type/recognizers| REC[AI Parser recognizer mapping]
+    CA -->|/admin/stage-requirements| STAGE[Mandatory-doc config]
+    CA -->|/documents/:id/retry-chain-write| RETRY[Manual chain recovery]
+    SA[Security Auditor] -->|/cases/:id/audit-log/ai-parser| AUDIT[Full AI-parser detail]
 ```
 
-- **Use cases**: onboard organizations, manage the tiered DocumentSchema registry, configure AI
-  Parser recognizer mappings per document type, manage Stage Requirements, manually recover a stuck
-  chain-write, read the full AI Parser audit trail.
-- **Endpoints touched**: everything under `/admin/*`, plus `/documents/:id/retry-chain-write` and
-  `/cases/:id/audit-log/ai-parser`.
-- **Risks / non-obvious**: this role concentrates nearly every genuinely dangerous capability in
-  the system — a schema change affects redaction correctness system-wide, a recognizer
-  misconfiguration affects AI Parser accuracy, and the ai-parser audit endpoint is the most
-  sensitive read path that exists. A compromised Admin credential is the single highest-impact
-  credential here, which is exactly why `retry-chain-write` reuses idempotency keys and the
+- **Use cases**: **Config Admin** — onboard organizations, manage the tiered DocumentSchema
+  registry, configure AI Parser recognizer mappings per document type, manage Stage Requirements,
+  manually recover a stuck chain-write. **Security Auditor** — read the full AI Parser audit trail,
+  nothing else.
+- **Endpoints touched**: Config Admin owns everything under `/admin/*` plus
+  `/documents/:id/retry-chain-write`; Security Auditor owns only `/cases/:id/audit-log/ai-parser`.
+- **Risks / non-obvious**: this domain concentrates nearly every genuinely dangerous capability in
+  the system, which is exactly why it's split into two roles rather than one — a schema change
+  affects redaction correctness system-wide, a recognizer misconfiguration affects AI Parser
+  accuracy, and the ai-parser audit endpoint is the most sensitive read path that exists. Splitting
+  Config Admin from Security Auditor means the account that edits redaction rules is never the same
+  account that inspects whether redaction is working — the same person checking their own work is
+  exactly the failure mode this split closes. `retry-chain-write` reuses idempotency keys and the
   ai-parser audit endpoint has no bulk/cross-case export — both are deliberate blast-radius limits
-  on this one role, not incidental design choices.
+  on top of the role split, not incidental design choices. Both roles are MFA-required (see
+  Security section) and both are flagged for second-person confirmation on their riskiest actions
+  (schema changes, chain-write recovery) once this moves past demo scale.
 
 ---
 
@@ -635,14 +647,16 @@ flowchart TD
 
 | Verb | Route | Auth (who) | Purpose | Notes |
 |---|---|---|---|---|
-| POST | /auth/login | Public | Issue session/JWT | — |
-| GET | /orgs/:orgId/users | Org Admin | List an org's users | — |
-| POST | /orgs | System Admin | Onboard external authority org | MVP: admin pre-registration, not self-service |
+| POST | /auth/login | Public | Issue access token (15 min) + refresh token (7 days) | Rate-limited 10/min per IP; constant-time check even against an unknown email, to prevent account enumeration via response timing |
+| POST | /auth/refresh | Any authenticated (via refresh token) | Exchange a refresh token for a new access token | New — a 15-minute access-token TTL is unusable without this |
+| POST | /auth/logout | Any authenticated | Invalidate the current session | New. LATER: write the token's JTI to a Redis revocation set so this works before natural expiry, not just client-side |
+| GET | /orgs/:orgId/users | Config Admin | List an org's users | — |
+| POST | /orgs | Config Admin | Onboard external authority org | MVP: admin pre-registration, not self-service |
 | POST | /cases | Duty Officer | Register FIR, create case | Action-shaped, not raw POST — validates crime-type config |
 | GET | /cases | Any authenticated role | List cases, filtered by role/org visibility | Paginated, filterable by crime_type/status |
 | GET | /cases/:id | Role-filtered | Fetch case summary + linked resources | — |
 | POST | /cases/:id/assign-io | SHO | Assign investigating officer | Creates CaseAssignment row |
-| POST | /cases/:id/reassign-io | SHO / Admin | Reassign IO mid-case | Logged as its own audit event; EvidenceRequest ownership follows the Case, not the individual IO, so in-flight requests transfer transparently |
+| POST | /cases/:id/reassign-io | SHO / Config Admin | Reassign IO mid-case | Logged as its own audit event; EvidenceRequest ownership follows the Case, not the individual IO, so in-flight requests transfer transparently |
 | POST | /cases/:id/case-diary | IO | Append a running case-diary entry | Append-only log (author, text, timestamp) — not a Document upload, a running notebook per case; text is routed through the AI Parser for auto-redaction before being visible beyond the assigned IO/SHO |
 | GET | /cases/:id/case-diary | Role-filtered | List case-diary entries | Same visibility rule as the rest of the case file |
 | POST | /cases/:id/evidence-requests | IO | Create request to external org | One row per request — supports parallel N requests |
@@ -652,8 +666,8 @@ flowchart TD
 | GET | /documents/:id | Role-filtered | Fetch document | Returns redacted or full view per auto-tagged sensitivity spans + role |
 | GET | /documents/:id/versions | Role-filtered | Version history | Append-only — originals never overwritten |
 | GET | /documents/:id/chain-status | Role-filtered | Poll blockchain confirmation | Short-poll target for Flow 2 |
-| GET | /documents?status=needs_review | Admin / Investigating Officer | List documents where the AI Parser fell back to fully-redacted after repeated failure | Plain filtered query on the documents table |
-| POST | /documents/:id/retry-chain-write | Admin | Manually re-trigger a stuck chain-write | Reuses the *original* idempotency key, never a fresh one — if Fabric actually confirmed the transaction before the crash, this guarantees the retry can't create a duplicate ledger entry |
+| GET | /documents?status=needs_review | Config Admin / Investigating Officer | List documents where the AI Parser fell back to fully-redacted after repeated failure, **including a low-confidence tag that technically "succeeded"** | Plain filtered query on the documents table; surface age + count in the UI so a growing backlog doesn't go unnoticed |
+| POST | /documents/:id/retry-chain-write | Config Admin | Manually re-trigger a stuck chain-write | Reuses the *original* idempotency key, never a fresh one — if Fabric actually confirmed the transaction before the crash, this guarantees the retry can't create a duplicate ledger entry. Flagged for second-person confirmation once past demo scale |
 | POST | /documents/:id/redact-tag | Investigating Officer | Correct/override an AI Parser sensitivity tag | Correction path over the AI Parser's auto-tags, not the primary tagging mechanism. "Recording officer" in earlier drafts of this doc meant the IO assigned to the case — resolved to the actual role name for consistency with the Role & Authority Taxonomy |
 | POST | /cases/:id/file-charge-sheet | Prosecutor | Attempt charge sheet filing | Validated against Stage Requirements — 409 if incomplete |
 | POST | /cases/:id/bail/arrest | Investigating Officer / Duty Officer | Record arrest | Starts independent bail track |
@@ -663,14 +677,14 @@ flowchart TD
 | POST | /cases/:id/bail/surety | Accused (submission-only) | Register surety bond | — |
 | POST | /cases/:id/trial/hearing-notice | Court | Schedule a trial hearing | Mirrors bail's hearing-notice; moves `investigation_status` to `Trial` |
 | POST | /cases/:id/judgment | Court | Record final judgment | Mirrors bail's order pattern; moves `investigation_status` to `Judgment` — closes the state diagram's `Trial → Judgment` transition |
-| GET | /cases/:id/audit-log | Role-filtered | Full or summarized audit trail incl. chain_status | Full for Admin/Court, summarized elsewhere |
-| GET | /cases/:id/audit-log/ai-parser | System Admin only | Full detail of every AI Parser auto-tag decision and every human correction on this case's documents | Deliberately narrower than the general audit log; every read of this endpoint is itself logged (meta-audit); no bulk/cross-case export |
-| GET | /admin/document-schemas | System Admin | Manage field-sensitivity schema registry | Tiered: full field definitions for the ~13 Tier 1+2 types (FIR, MLC, Witness Statement + Domestic Violence showcase set), one generic default profile inherited by the remaining ~40+ of the 57 canonical types |
-| POST | /admin/document-schemas/:type/recognizers | System Admin | Map entity types (name, phone, medical condition, ID number, ...) to a DocumentSchema's sensitivity fields | One-time-per-type config step that drives the AI Parser |
-| GET | /admin/stage-requirements | System Admin | Manage mandatory-document/evidence config per crime type | Drives Flow 3's validation check |
+| GET | /cases/:id/audit-log | Role-filtered | Full or summarized audit trail incl. chain_status | Full for Config Admin/Security Auditor/Court, summarized elsewhere |
+| GET | /cases/:id/audit-log/ai-parser | **Security Auditor only** (not Config Admin) | Full detail of every AI Parser auto-tag decision and every human correction on this case's documents | Deliberately narrower than the general audit log; rate-limited separately (20/min per user) from the general API default; every read of this endpoint is itself logged (meta-audit); no bulk/cross-case export |
+| GET | /admin/document-schemas | Config Admin | Manage field-sensitivity schema registry | Tiered: full field definitions for the ~13 Tier 1+2 types (FIR, MLC, Witness Statement + Domestic Violence showcase set), one generic default profile inherited by the remaining ~40+ of the 57 canonical types |
+| POST | /admin/document-schemas/:type/recognizers | Config Admin | Map entity types (name, phone, medical condition, ID number, ...) to a DocumentSchema's sensitivity fields | One-time-per-type config step that drives the AI Parser; every change writes an old-vs-new diff to the audit log |
+| GET | /admin/stage-requirements | Config Admin | Manage mandatory-document/evidence config per crime type | Drives Flow 3's validation check |
 | GET | /reports/case-metadata | Records / NCRB Analyst | De-identified case metadata only | Backed by a dedicated Postgres view (e.g. `case_metadata_deidentified`) exposing only non-sensitive columns — no separate redaction logic to build or keep in sync |
 
-*(34 endpoints — every route maps to a resource + verb derived mechanically from the case/document/evidence/bail resource model, not invented ad hoc.)*
+*(36 endpoints — every route maps to a resource + verb derived mechanically from the case/document/evidence/bail resource model, not invented ad hoc. `/auth/refresh` and `/auth/logout` are the two additions from this pass — required once the access-token TTL was tightened to 15 minutes.)*
 
 ### Arrow Specifications (every connection in the container diagram)
 
@@ -721,6 +735,7 @@ short-polling a status endpoint is the simplest thing that works.
 | Investigation status | API → `cases.investigation_status` | All roles (filtered) | None | Full lifecycle: FIR → Evidence Collection → Charge Sheet Ready → Charge Sheet Filed → Trial → Judgment |
 | Bail status | API → `cases.bail_status` | All roles (filtered) | None | Independent of investigation_status — see Flow 4 |
 | Document raw bytes | Object Storage | OCR Worker, API (serving to authorized roles) | None — single copy | — |
+| Document raw_text (OCR output) | OCR Worker → `documents.raw_text` | AI Parser Worker only — never served directly to any role, redacted views are derived from tags, not this column | None | Re-extracted only if document is re-uploaded as new version |
 | Document structured fields | OCR Worker → `documents` table | AI Parser Worker, API (redaction filter reads this) | None | Re-extracted only if document is re-uploaded as new version |
 | Document sensitivity tags | AI Parser Worker writes automatically; recording officer can overwrite an individual tag via `redact-tag` | API (redaction filter reads this on every document read) | None | Not retroactive on schema change — new uploads only |
 | Document hash + chain_status | Chain Worker writes `chain_status`; **Fabric ledger is the actual source of truth for the hash's validity** | API (displays status) | DB holds a *mirror* of confirmation state | Reconciliation job compares DB chain_status against ledger periodically (LATER — manual reconciliation acceptable at MVP scale); admin can force a retry via retry-chain-write |
@@ -730,8 +745,9 @@ short-polling a status endpoint is the simplest thing that works.
 | CaseAssignment (current IO) | API, written by SHO only | All roles needing to know current IO | None | Updated in place on reassignment; history preserved via audit log |
 | DocumentSchema registry (incl. recognizer mappings) | Admin, via `/admin/document-schemas` and `/admin/document-schemas/:type/recognizers` | AI Parser Worker (reads recognizer config), redaction filter (reads schema on every document read) | None | Changing a schema or recognizer mapping does not retroactively re-tag already-processed documents |
 | Stage Requirements config | Admin, via `/admin/stage-requirements` | Charge-sheet validation logic | None | — |
-| Audit log (incl. AI Parser decisions + corrections) | API, append-only write on every state-changing action, including AI Parser auto-tags and human corrections | Role-filtered readers (aggregate view); full AI-parser entity-level detail is System Admin only | None — blockchain holds only the *hash* of each entry, not a full copy | Immutable by design; audit entries never store the redacted content itself, only metadata about the tagging decision. Each row also stores `row_hash = hash(prev_row_hash + content)`, an internal chain independent of Fabric that makes deleting or reordering a row detectable |
-| Meta-audit (who read the AI-parser audit trail) | API, append-only write triggered on every `GET /cases/:id/audit-log/ai-parser` | System Admin only | None | Same immutability rule as the audit log itself |
+| Audit log (incl. AI Parser decisions + corrections) | API, append-only write on every state-changing action, including AI Parser auto-tags, human corrections, and recognizer-mapping config changes | Role-filtered readers (aggregate view); full AI-parser entity-level detail is Security Auditor only | None — blockchain holds only the *hash* of each entry, not a full copy | Immutable by design; audit entries never store the redacted content itself, only metadata about the tagging decision. Each row also stores `row_hash = hash(prev_row_hash + content)`, an internal chain independent of Fabric that makes deleting or reordering a row detectable — **every append must hold `pg_advisory_xact_lock` for its duration, or concurrent writers can fork the chain silently** |
+| Document retention state (`retention_legal_hold`) | Config Admin (sets/clears a legal hold) | API (blocks any future archival/deletion action while set) | None | LATER: full hot/warm/cold retention tiers and a secure-deletion policy are out of MVP scope by conscious decision (see Open Questions) — this one column exists now so a hold can be recorded even before that policy is built |
+| Meta-audit (who read the AI-parser audit trail) | API, append-only write triggered on every `GET /cases/:id/audit-log/ai-parser` | Security Auditor only | None | Same immutability rule as the audit log itself |
 
 **Rule enforced here**: the blockchain is never treated as a second full copy of anything — it holds
 hashes only. Postgres is the single owner of all actual content; Fabric is the tamper-evidence layer
@@ -790,6 +806,97 @@ Individual audit-log entries are hash-chained to Fabric, which proves a given ac
 ### Case Diary now routes through the redaction pipeline — closing a real gap
 Case Diary entries are officer-written free text and, prior to this pass, bypassed OCR and the AI Parser entirely — a diary entry containing a victim's name or a medical detail was never auto-redacted before other roles could read it, directly undercutting the system's flagship feature. **Resolved**: Case Diary text is now submitted to the AI Parser as a lightweight text-tagging job (same Presidio/spaCy pipeline, skipping OCR since there's no image to extract from) before the entry is marked readable by anyone beyond the assigned IO and SHO. The same fail-closed rule applies as everywhere else: if tagging fails, the entry stays visible only to the assigned IO/SHO until it succeeds or is manually reviewed.
 
+### Low-confidence AI Parser tags are not the same as trustworthy ones
+A confidence score has been recorded on every tag since the AI Parser was designed, but nothing previously *used* it — a tag at 12% confidence was treated identically to one at 99%. **Resolved**: any document where a tag falls below a confidence threshold (default 70/100) is routed to `needs_review` even though tagging technically succeeded — the same queue and the same fail-closed posture as an outright AI Parser failure. A missed redaction from an overconfident low-quality match is a real, one-time leak, not a statistic that averages out over a large enough demo.
+
+### Concurrent writes can silently fork the audit log's hash chain
+The audit log's `row_hash = hash(prev_row_hash + content)` chain (above) is only a real tamper-evidence guarantee if writes are serialized. The API and multiple Celery workers all append to the same table — if two of them read the same `prev_hash` at the same moment and both insert, the chain forks silently and neither half is individually invalid, defeating the entire mechanism without any error being raised. **Every audit-log append must take a `pg_advisory_xact_lock` for the duration of its read-prev-hash-then-insert transaction**, serializing appends across every process, API and worker alike. This is not an optional hardening step — an unserialized hash chain is a broken guarantee dressed up as a working one.
+
+### Token lifetime, revocation, and login hardening
+- **Access tokens are short-lived (15 minutes) with a refresh token (7 days)** — the access-token TTL *is* the revocation mechanism at this scale, rather than an undefined lifetime that gets improvised under deadline pressure later.
+- **Constant-time login**: a login attempt against an email that doesn't exist must still run a dummy bcrypt check against a fixed hash, taking the same time as a real password check. Skipping this lets an attacker measure response timing to enumerate which emails belong to real officer accounts, entirely without guessing a password.
+- **Rate limiting, with actual numbers stated**: `/auth/login` is capped at 10 attempts/minute per IP; `/cases/:id/audit-log/ai-parser` — the single most sensitive read path in the system — gets its own tighter limit (20/minute per user), separate from the general API default, specifically so it can't be quietly spammed to bloat the tamper-evident log or fish for patterns.
+- **Token revocation (LATER, scoped)**: a 15-minute TTL bounds the damage of a stolen token well enough for the demo. A production deployment needs a Redis-backed JTI denylist so logout / suspected compromise can invalidate a session immediately rather than waiting out the TTL.
+- **MFA required for Config Admin, Security Auditor, and Court** — the highest-privilege and highest-consequence roles in the system get a second factor; other roles don't need the friction at this scale.
+
+### Admin was a single role holding too much power — now split
+A single "admin" role previously held schema-editing power, audit-inspection power, and chain-recovery power all at once — one compromised account meant total control, and it meant the account that configures redaction rules was also the account that checks whether redaction is working, which is the same person checking their own work. **Resolved**: split into **Config Admin** (document schemas, recognizer mappings, stage requirements, org onboarding, chain-write recovery) and **Security Auditor** (the AI-parser audit trail, nothing else). See Domain 8 below and the endpoint table's Auth column.
+- Every recognizer-mapping change now writes an `audit_log` entry with the old-vs-new mapping diff — tampering with a recognizer to quietly un-redact a phone number or ID field is exactly the kind of change that must be traceable, not silent.
+- **Second-person confirmation (LATER)**: schema changes and manual chain-write recovery are flagged as needing two-person sign-off before they take effect in a real deployment — not built for the baseline, but don't wire single-click execution for these and call the job done.
+
+### Defense-in-depth beyond the application layer (LATER)
+- **Postgres Row-Level Security by `org_id`**, as a second enforcement layer independent of the API's RBAC middleware — if the app-layer check ever has a bug, this is what stands between that bug and a raw cross-org leak.
+- **Isolate the Chain Worker's signing-key access** in its own locked-down container/network, separate from the other workers — this key is the entire tamper-proof guarantee, and it shouldn't share a blast radius with, say, the OCR worker.
+- **External/defense accounts get a stricter security profile** than internal police accounts (shorter session TTL, mandatory MFA candidate, tighter rate limits) — a compromised external account is the most likely real-world attack path into this system, since it's the trust boundary furthest from direct organizational control.
+- **Secret scanning in CI** (e.g. gitleaks) and **dependency vulnerability scanning for the frontend** (`npm audit` / Dependabot) — cheap, standard, and currently absent.
+
+### Frontend hard rules — the server decides visibility, never the browser
+The frontend is the one entry point for every role, and it's the part of this design that had the least explicit security treatment before this pass:
+- **The server must never send content a role isn't allowed to see, even redacted-looking, for the browser to hide with CSS/UI polish** — if the full document ever reaches the browser and is only visually hidden, anyone can read it via dev tools. No exception for a nicer UI. A hidden button or menu is a convenience, never the access control — the real check is always server-side.
+- **Store the auth token in an httpOnly cookie, not `localStorage`** — a token in `localStorage` is readable by any XSS bug in any dependency; an httpOnly cookie isn't readable by JavaScript at all. If cookies are used, add standard CSRF protection alongside them.
+- **Clear all app state on every login/logout** — on a shared station device, one role's cached data must never flash into the next officer's session.
+- **Generic error messages for external/defense users**, with real detail logged server-side only — the least-trusted audience is the most likely to see and misuse a raw stack trace.
+- Standard hardening, cheap to add: Content-Security-Policy + anti-clickjacking headers (three trust tiers — internal, external orgs, defense — share one app), source maps off in production builds, backend-side validation of free-text fields (never rely on frontend-only XSS protection).
+
+---
+
+## Field Operations — Offline Architecture (Design Only, Not Built)
+
+**Current state**: if the API server or a station's internet connectivity drops, the system stops
+working entirely — there is no offline mode. Fine for a controlled demo; a real risk for a rural
+police chowki or a mountain outpost with unreliable connectivity. This section is a designed,
+not-yet-built answer, explicitly phased so it doesn't compete with demo-week priorities. Nothing
+here changes the container diagram or endpoint table above — it describes what a future field
+client does, not a rebuild of the server side.
+
+### What's offline-capable and what isn't
+
+| Action | Offline-capable? | Why |
+|---|---|---|
+| Register a new FIR | Yes | Pure creation — no dependency on server-side state, assigns a local UUID + timestamp, queues for sync |
+| Upload a document/evidence file | Yes (local stage only) | Saved to encrypted local storage with a local SHA-256 fingerprint generated immediately; actually uploads once back online |
+| Add a Case Diary entry | Yes | Append-only, no dependency on other data |
+| View a document | Read-only, cached copies only | The redaction filter must never execute on untrusted, unauthenticated local state — a device can cache a view it already legitimately received, never compute a new one offline |
+| Submit an evidence-request response | No | Needs live routing to external Bank/Hospital/FSL systems |
+| File a charge sheet | No | Needs a live Stage Requirements completeness check |
+| Bail / trial / judgment actions | No | Needs live cross-role state (a court action while offline would race the actual server state) |
+
+The pattern: only **pure "create new" actions** go offline. Nothing that reads or depends on
+server-side state, and nothing that edits an existing record, does — which is also why conflict
+resolution barely needs to exist (see below).
+
+### Sync architecture
+
+| Phase | What happens |
+|---|---|
+| 1. Offline intake | Officer's device writes the action to a local **SQLCipher (AES-256 encrypted SQLite)** store, in order, with an immediate local SHA-256 fingerprint |
+| 2. Connectivity restored | Device/station gateway detects a real connectivity heartbeat and opens a mutual-TLS session to the central API |
+| 3. Atomic resync | Queued actions replay sequentially, exactly like normal live requests — no separate "offline" code path on the server. Files upload to MinIO → metadata inserts to PostgreSQL → hash dispatches to Fabric, same order as the online flow |
+| 4. Conflict & tamper check | Server verifies the local SHA-256 matches the uploaded file; the resulting audit-log entry records `source="offline_sync"` plus both the original device timestamp and the server receipt timestamp |
+
+Because only creates go offline, "conflict resolution" is mostly a non-problem by construction — if
+one queued action does fail on replay, it's flagged for the officer to review, using the same
+error-handling path as any other failure, not a bespoke offline conflict system.
+
+### Field-specific security notes
+
+| Threat | Countermeasure |
+|---|---|
+| Stolen station device | Local SQLCipher database encrypted (AES-256); device-bound PIN/biometric key derivation |
+| Clock tampering on the offline device | Audit log records both device timestamp and server receipt timestamp; flagged if the delta exceeds 1 hour |
+| Shared terminal, multiple officers | Offline workspace isolated per logged-in officer profile, not per device; auto-lock after 5 minutes idle |
+| Login token expiring while offline | A separate, more limited offline permission scope that expires immediately on reconnect, rather than trying to keep a normal access token "alive" with no server to validate it against |
+| A large batch of actions syncing at once after a long offline stretch | Tag these clearly in the audit log (`source="offline_sync"`) so a legitimate backlog isn't mistaken for suspicious bulk activity |
+
+### Rollout — explicitly not needed for the demo
+
+| Phase | What | When |
+|---|---|---|
+| 0 | This design only, no code | Now |
+| 1 | A simple "is the server actually down?" status check + a cache of recently-viewed cases | First real pilot with more than one station |
+| 2 | Full offline FIR + Case Diary + document intake, per the table above | A confirmed low-connectivity station is actually in use |
+| 3 | Expand further | Only if Phase 2 proves it's actually needed |
+
 ---
 
 ## Domain Overlays Applied
@@ -833,7 +940,13 @@ function analogously to separate tenant organizations, each with their own users
 | Case Diary | Yes | Named in the Context diagram and present in every one of the 15 workflows' document lists |
 | Needs-review queue | Yes, `GET /documents?status=needs_review` | Gives the AI Parser's and OCR's "manual review" fail-safes somewhere to actually surface |
 | Records/NCRB Analyst data path | Dedicated de-identified Postgres view, not new redaction logic | Keeps this role's access mechanically separate from the main redaction filter |
-| AI Parser audit trail | Every auto-tag + correction logged, hash-chained; full entity-level detail is System Admin only; reads of that detail are themselves logged (meta-audit) | Answers "can we prove what the AI did and who looked at it" |
+| AI Parser audit trail | Every auto-tag + correction logged, hash-chained under `pg_advisory_xact_lock`; full entity-level detail is Security Auditor only (not Config Admin); reads of that detail are themselves logged (meta-audit) | Answers "can we prove what the AI did and who looked at it" |
+| Admin role split | Config Admin (schemas, recognizers, org onboarding, chain recovery) vs. Security Auditor (AI-parser audit trail only) — no single role holds both | Closes "one compromised admin = total control, including checking their own redaction work" |
+| Auth hardening | 15-min access token + 7-day refresh token, constant-time login check, login rate-limited 10/min per IP, MFA required for Config Admin/Security Auditor/Court | Bounds stolen-token damage, prevents account enumeration, matches the two highest-privilege roles to the strongest auth requirement |
+| OCR resilience | Tesseract as a fallback engine when PaddleOCR itself errors (not just low-confidence output) | One less silent dead-letter path for valid evidence |
+| Reconciliation cron | Periodic check flags any document stuck in `status=processing` beyond ~10 minutes | Closes the "OCR→AI-parse handoff enqueue silently failed" blind spot |
+| Redis persistence | AOF enabled | A queued job must not vanish on a container restart after the API already returned 202 to the uploader |
+| MinIO path convention | `{org_id}/{case_id}/{doc_id}/v{version}`, one bucket, server-side encryption | Prevents cross-tenant object traversal in a single unpartitioned bucket |
 | Firewall / default-deny | Yes, even for demo | No exceptions |
 | HTTPS/TLS | Yes, no exceptions | Same |
 | CI/CD pipeline | Lightweight (GitHub Actions: run tests on push) | 5-person team committing in parallel benefits from catching breakage early |
@@ -851,6 +964,7 @@ function analogously to separate tenant organizations, each with their own users
 | Cost estimate | Near-zero — everything self-hosted/open-source; only real cost is compute during the build/demo window | Worth stating plainly, it's a strength |
 | Testing priority | Auth/RBAC tests first, then AI Parser tagging accuracy + redaction-filter tests, then charge-sheet Stage Requirements validation logic | Exactly what judges will probe hardest |
 | RTO/RPO (informal) | "Acceptable to lose in-progress demo state; not acceptable to lose a blockchain-confirmed record" | Good pitch line — confirmed records have a fundamentally different resilience story than working state |
+| DB restart runbook | Write it down, test it once before judging day | Postgres is the confirmed single point of failure in this design — a written-but-never-tried runbook is not meaningfully better than no runbook during an actual outage |
 | Accessibility baseline | Semantic HTML, alt text | Costs nothing to start right |
 
 ### LATER (path kept open, not built)
@@ -868,9 +982,17 @@ function analogously to separate tenant organizations, each with their own users
 | Formal DR runbook | Backup strategy (Postgres point-in-time recovery) is enough for now | Real deployment stage |
 | Cross-case evidence linking | A Document belongs to one Case; real serial-crime evidence sometimes spans two | If organized/serial-crime cases become a demonstrated priority |
 | Search / full-text indexing across cases | No expensive query pattern exists yet at demo scale | If case volume grows past direct case-number lookup being sufficient |
-| Offline-capable client (local write-ahead queue) | Demo runs on a controlled connection | Real deployment in low-connectivity police stations |
+| Offline-capable client | Demo runs on a controlled connection | Real deployment in low-connectivity police stations — full design in "Field Operations — Offline Architecture" below, phased rollout, none of it built yet |
 | Multi-language OCR/NER (PaddleOCR and Presidio both support it) | English is sufficient for the demo showcase | Real deployment across non-English-primary states |
 | Victim-facing case-status lookup | Not part of the officer-facing demo path | If citizen-transparency becomes a stated priority |
+| Postgres Row-Level Security by `org_id`, as a second layer under the API's RBAC middleware | App-layer middleware is the single enforcement point today; a good one, but a single one | Before any real multi-org production pilot — a defense-in-depth layer, not a replacement for the app-layer check |
+| Second-person confirmation on schema changes and manual chain-write recovery | Adds real workflow friction not worth it at demo scale with a 2-person admin team | Real deployment, once these actions have consequences beyond a demo reset |
+| Retention layer — hot/warm/cold storage tiers, secure deletion, formal legal-hold workflow | Evidence disposal/retention rules were a conscious MVP exclusion from the outset (see Open Questions); `retention_legal_hold` exists as a placeholder column, the policy engine around it doesn't | Real deployment — this needs actual legal input on retention periods, not an engineering guess |
+| `schema_version` tagging + a batch re-tagging admin endpoint | New-uploads-only retroactivity is the right MVP default (already decided); this adds an opt-in way to intentionally re-run old documents under new rules later | If an admin ever needs to deliberately refresh historical documents against an updated schema |
+| Multi-court access scoping (Court sees only their own court's cases, not every court) | Only one court instance exists at demo scale | More than one court onboarded |
+| Document-similarity matching (Sentence Transformers) for duplicate/related-case detection | A genuinely new capability, not a gap fix — real scope, not a quick add | If duplicate-FIR or related-case detection becomes a stated product priority |
+| Named observability upgrade path: Prometheus + Grafana + Loki | Structured stdout logs are enough at this scale; naming the actual tools now avoids an "improvise it later" scramble | More than 2-3 services genuinely need cross-service metrics/log correlation |
+| Secret scanning (gitleaks) + frontend dependency scanning (`npm audit`/Dependabot) in CI | Cheap but not yet wired into the lightweight CI pipeline | Before the first real (non-demo) deployment — costs nothing to add, no reason to wait, but not demo-blocking |
 
 ### WATCHLIST (explicit non-decision)
 
@@ -896,6 +1018,12 @@ function analogously to separate tenant organizations, each with their own users
 2. **Bail-pathway data gaps** — 9 of 15 crime types have "bail pathway not yet confirmed" in the
    source taxonomy (some legally load-bearing). Doesn't block the Domestic Violence demo; a real gap
    if judges ask about other crime types.
+3. **Conscious exclusions, carried forward from the project's original scoping** — POCSO/juvenile
+   pathways, appeals, multi-jurisdiction FIR transfer, victim compensation tracking, and full
+   evidence disposal/retention rules (the `retention_legal_hold` column is a placeholder for the
+   last of these, not the policy itself) remain out of scope by deliberate choice, not oversight.
+   Flagged once here so it stays a conscious, on-record decision rather than something that quietly
+   never got revisited — no action needed unless the team wants to reopen one.
 
 Everything else in this document is confirmed and buildable as-is.
 

@@ -62,6 +62,7 @@ class DocumentUploadResponse(BaseModel):
     version: int
     status: str
     chain_status: str
+    doc_hash: Optional[str] = None
 
 
 class DocumentView(BaseModel):
@@ -72,6 +73,8 @@ class DocumentView(BaseModel):
     status: str
     chain_status: str
     text: Optional[str] = None  # None while status != "ready"; masked or full depending on role
+    download_url: Optional[str] = None
+    doc_hash: Optional[str] = None
 
 
 class DocumentVersionSummary(BaseModel):

@@ -20,26 +20,15 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.audit import write_audit_log
+from app.config import settings
 from app.database import get_db
 from app.queue import QueueClient, get_queue
 from app.redaction import get_document_view
 from app.security import FULL_TEXT_ACCESS_ROLES, assert_case_access, get_current_claims, require_role
 from app.storage import ObjectStorage, get_storage, object_key, sha256_hex
+from app.upload_validator import validate_upload_stream
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-
-# Rough, baseline-only classification — a real implementation should sniff
-# actual file content (python-magic), not trust the declared content-type.
-# See SYSTEM_DESIGN.md's input-validation rules: MIME spoofing via
-# extension/declared type is a known, real attack surface, not addressed here.
-_BINARY_EVIDENCE_PREFIXES = ("video/", "audio/")
-_BINARY_EVIDENCE_TYPES = {"application/octet-stream"}
-
-
-def _is_binary_evidence(content_type: Optional[str]) -> bool:
-    if not content_type:
-        return False
-    return content_type in _BINARY_EVIDENCE_TYPES or any(content_type.startswith(p) for p in _BINARY_EVIDENCE_PREFIXES)
 
 
 def _next_version(db: Session, case_id: UUID, doc_type: str) -> int:
@@ -64,17 +53,20 @@ async def upload_document(
 ):
     """POST /documents — multipart. Upload document or binary evidence.
 
-    Scope note on "role permitted for that case/doc-type": this baseline
-    checks case-level access (assert_case_access) but not the finer-grained
-    per-doc-type permission the full Access Model implies — any role with
-    access to the case can upload any doc_type for now.
-
-    Track A (hashing) and Track B (OCR, text-bearing only) are both
-    enqueued here, matching Flow 2 — they run independently, neither
-    blocks this response. Binary evidence skips Track B entirely and goes
-    straight to status="ready" with metadata-only tagging (there's nothing
-    to redact in a video file's bytes).
+    Security & Validation Enhancements:
+    - Enforces UPLOAD_ALLOWED_ROLES allowlist check.
+    - Streaming magic-byte MIME detection (python-magic) preventing extension spoofing.
+    - Early abort on streaming size cap exceeding MAX_UPLOAD_SIZE_MB (default: 50MB).
+    - SHA-256 deduplication: returns existing document if identical hash uploaded.
+    - Dual-track worker dispatch (Track A: Blockchain, Track B: OCR for text).
     """
+    allowed_roles = [r.strip() for r in getattr(settings, "UPLOAD_ALLOWED_ROLES", "").split(",") if r.strip()]
+    if allowed_roles and claims.get("role") not in allowed_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Role '{claims.get('role')}' is not authorized to upload evidence",
+        )
+
     try:
         case_uuid = UUID(case_id)
     except ValueError:
@@ -86,17 +78,36 @@ async def upload_document(
 
     assert_case_access(case_uuid, claims, db)
 
-    data = await file.read()
-    doc_hash = sha256_hex(data)
+    # 1. Streaming validation with magic-byte MIME sniffing and size capping
+    validation = await validate_upload_stream(
+        file,
+        max_size_mb=getattr(settings, "MAX_UPLOAD_SIZE_MB", 50),
+    )
+    data = validation.data
+    doc_hash = validation.sha256_hash
+    is_binary = validation.is_binary_evidence
+
+    # 2. Deduplication check — if exact file content already uploaded for this case & doc_type, return existing
+    existing = (
+        db.query(models.Document)
+        .filter(
+            models.Document.case_id == case_uuid,
+            models.Document.doc_type == doc_type,
+            models.Document.doc_hash == doc_hash,
+        )
+        .first()
+    )
+    if existing:
+        return existing
+
     version = _next_version(db, case_uuid, doc_type)
     doc_id = uuid.uuid4()
-    is_binary = _is_binary_evidence(file.content_type)
 
     user = db.get(models.User, UUID(claims["sub"]))
     org_id = user.org_id if user else case_uuid  # fallback keeps the path stable even if user lookup ever fails
 
     key = object_key(org_id, case_uuid, doc_id, version)
-    storage.put(key, data)
+    storage.put(key, data, content_type=validation.detected_mime)
 
     document = models.Document(
         id=doc_id,
@@ -114,9 +125,7 @@ async def upload_document(
     db.refresh(document)
 
     # Deterministic, not random — a retry derives the exact same key from
-    # the same (document_id, version) pair, which is what "reuse the
-    # original idempotency key, never mint a new one" actually means in
-    # practice. See retry_chain_write below and workers/chain_worker/worker.py.
+    # the same (document_id, version) pair.
     idempotency_key = f"{document.id}:v{document.version}"
 
     # Track A — always, independent of Track B. See System Connections #8.
@@ -132,7 +141,13 @@ async def upload_document(
         actor_user_id=UUID(claims["sub"]),
         target_type="document",
         target_id=document.id,
-        metadata={"doc_type": doc_type, "version": version, "content_type": file.content_type, "is_binary": is_binary},
+        metadata={
+            "doc_type": doc_type,
+            "version": version,
+            "content_type": validation.detected_mime,
+            "is_binary": is_binary,
+            "doc_hash": doc_hash,
+        },
     )
 
     return document
@@ -152,7 +167,12 @@ def list_documents_needing_review(
 
 
 @router.get("/{document_id}", response_model=schemas.DocumentView)
-def get_document(document_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)):
+def get_document(
+    document_id: str,
+    claims: dict = Depends(get_current_claims),
+    db: Session = Depends(get_db),
+    storage: ObjectStorage = Depends(get_storage),
+):
     """GET /documents/:id — Role-filtered. Returns the redacted or full view
     per auto-tagged sensitivity spans + role, via app.redaction — never a
     bespoke redacted-vs-full branch written ad hoc in this handler."""
@@ -164,6 +184,7 @@ def get_document(document_id: str, claims: dict = Depends(get_current_claims), d
 
     tags = db.query(models.DocumentSensitivityTag).filter(models.DocumentSensitivityTag.document_id == document.id).all()
     view = get_document_view(document, tags, claims.get("role"), FULL_TEXT_ACCESS_ROLES)
+    download_url = storage.get_presigned_url(document.storage_path) if document.storage_path else None
 
     return schemas.DocumentView(
         id=document.id,
@@ -173,6 +194,8 @@ def get_document(document_id: str, claims: dict = Depends(get_current_claims), d
         status=document.status,
         chain_status=document.chain_status,
         text=view["text"],
+        download_url=download_url,
+        doc_hash=document.doc_hash,
     )
 
 

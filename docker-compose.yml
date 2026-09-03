@@ -46,6 +46,8 @@ services:
       - "8000:8000"
     volumes:
       - ./api/app:/app/app
+      - ./api/tests:/app/tests
+      - ./workers:/workers
 
   # ocr_worker, ai_parser_worker, and chain_worker all build from the REPO
   # ROOT (context: .), not their own directory — each one's Dockerfile

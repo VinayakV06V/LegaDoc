@@ -203,6 +203,30 @@ The compact sync/async/retry/volume version of this same table lives in the **In
 section below, under Arrow Specifications — this table is the "why and how it breaks" companion to
 that one.
 
+### The chaincode interface (concrete, not just conceptual)
+
+`fabric-network/chaincode/hashledger` implements exactly three functions — deliberately narrow, not
+a generic asset-transfer contract:
+
+- **`RecordHash(docID, docHash, orgID)`** — writes a hash record once, keyed by `docID` (this
+  system's `Document.id`, already globally unique per version). Idempotent for a resubmission of the
+  *same* hash (supports `retry-chain-write` safely); fails loudly if the *same* `docID` is ever
+  submitted with a *different* hash — that would mean either an upstream bug or actual tampering,
+  never something to silently accept.
+- **`GetHash(docID)`** — reads the stored record back.
+- **`VerifyHash(docID, hashToCheck)`** — the direct support for the strongest demo moment this
+  architecture can produce: recompute a document's hash locally, ask the ledger if it matches, get a
+  live yes/no. Run it once on an untouched document and again after deliberately editing the stored
+  file — that live contrast is worth more than any slide describing tamper-evidence in the abstract.
+
+The Chain Worker's own orchestration (idempotency-key handling, retry, `chain_status` transitions,
+audit logging) is implemented and unit-tested against a mocked Fabric boundary — see
+`workers/chain_worker/worker.py` and `api/tests/test_chain_worker.py`. The chaincode itself and the
+`fabric_client.py` module that calls it are **not** verified end-to-end against a real network — see
+`fabric-network/README.md` for exactly what's been checked and what hasn't. Standing up the network
+and confirming one real signed transaction remains the first build milestone, unchanged from the
+Build Prompt Seed below.
+
 ---
 
 ## Key Flows

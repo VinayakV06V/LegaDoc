@@ -5,14 +5,33 @@ section's fail-closed rule.
 
 Handles both Document text (post-OCR) and Case Diary entries (see "Case Diary
 now routes through the redaction pipeline") — same task, same rule either way.
+
+DB access pattern matches workers/chain_worker/worker.py — reuse api/app's
+models/database/audit/config directly rather than duplicating the schema.
+Uncomment the imports below once you start filling this in; app.audit's
+write_audit_log() already handles the row_hash chain (including the
+pg_advisory_xact_lock) correctly — call that, don't reimplement it here.
 """
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "api"))
 
 from celery import Celery
 
+from app.config import settings
+
+# Uncomment as you need them:
+# from uuid import UUID
+# from app import models
+# from app.database import SessionLocal
+# from app.audit import write_audit_log
+
 app = Celery(
     "ai_parser_worker",
-    broker="redis://redis:6379/0",
-    backend="redis://redis:6379/1",
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
 )
 
 

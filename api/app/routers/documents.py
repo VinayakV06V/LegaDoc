@@ -113,8 +113,14 @@ async def upload_document(
     db.commit()
     db.refresh(document)
 
+    # Deterministic, not random — a retry derives the exact same key from
+    # the same (document_id, version) pair, which is what "reuse the
+    # original idempotency key, never mint a new one" actually means in
+    # practice. See retry_chain_write below and workers/chain_worker/worker.py.
+    idempotency_key = f"{document.id}:v{document.version}"
+
     # Track A — always, independent of Track B. See System Connections #8.
-    queue_client.enqueue("chain_worker.write_hash", document_id=str(document.id))
+    queue_client.enqueue("chain_worker.write_hash", document_id=str(document.id), idempotency_key=idempotency_key)
     # Track B — text-bearing documents only. See System Connections #6.
     if not is_binary:
         queue_client.enqueue("ocr_worker.extract_document", document_id=str(document.id))
@@ -202,12 +208,41 @@ def get_chain_status(document_id: str, claims: dict = Depends(get_current_claims
 
 
 @router.post("/{document_id}/retry-chain-write")
-def retry_chain_write(document_id: str, claims: dict = Depends(require_role("config_admin"))):
-    """POST /documents/:id/retry-chain-write — Config Admin. Not
-    implemented in this pass — there's no live Chain Worker/Fabric network
-    in this environment to actually retry against yet. MUST reuse the
-    original idempotency key when this is built (see SYSTEM_DESIGN.md)."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+def retry_chain_write(
+    document_id: str,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db),
+    queue_client: QueueClient = Depends(get_queue),
+):
+    """POST /documents/:id/retry-chain-write — Config Admin. Manually
+    re-trigger a stuck chain-write. Reuses the SAME deterministic
+    idempotency key the original upload used (see upload_document above) —
+    never mints a new one, so if Fabric actually confirmed the transaction
+    before a prior crash, the chaincode's own idempotent RecordHash (see
+    hashledger.go) plus this same key together prevent a duplicate ledger
+    entry. A no-op if the document is already confirmed.
+    """
+    document = db.get(models.Document, UUID(document_id))
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    if document.chain_status == "confirmed":
+        return {"chain_status": "confirmed", "retry_enqueued": False, "note": "already confirmed, nothing to retry"}
+
+    idempotency_key = f"{document.id}:v{document.version}"
+    queue_client.enqueue("chain_worker.write_hash", document_id=str(document.id), idempotency_key=idempotency_key)
+
+    write_audit_log(
+        db,
+        action="chain_write_retry_triggered",
+        case_id=document.case_id,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"idempotency_key": idempotency_key},
+    )
+
+    return {"chain_status": document.chain_status, "retry_enqueued": True, "idempotency_key": idempotency_key}
 
 
 @router.post("/{document_id}/redact-tag", response_model=schemas.DocumentView)

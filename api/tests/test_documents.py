@@ -55,6 +55,9 @@ def test_upload_text_document_enqueues_both_tracks(client, make_user, db_session
     task_names = {job["task_name"] for job in fake_queue.enqueued}
     assert task_names == {"chain_worker.write_hash", "ocr_worker.extract_document"}
 
+    chain_job = next(j for j in fake_queue.enqueued if j["task_name"] == "chain_worker.write_hash")
+    assert chain_job["kwargs"]["idempotency_key"] == f"{body['id']}:v1"
+
 
 def test_upload_binary_evidence_skips_ocr_and_goes_straight_to_ready(client, make_user, db_session, fake_queue):
     case, io, io_token = _setup_case_with_io(client, make_user, db_session)
@@ -204,6 +207,65 @@ def test_chain_status_endpoint(client, make_user, db_session):
 
     assert resp.status_code == 200
     assert resp.json() == {"document_id": doc_id, "chain_status": "pending"}
+
+
+def test_retry_chain_write_reenqueues_with_the_same_idempotency_key(client, make_user, db_session, fake_queue):
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    make_user("config_admin", email="admin@example.com", password="pw", org=io.organization)
+    admin_token = login(client, "admin@example.com", "pw").json()["access_token"]
+
+    doc_id = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("statement.txt", b"content", "text/plain")},
+        headers=auth_headers(io_token),
+    ).json()["id"]
+    original_key = next(j for j in fake_queue.enqueued if j["task_name"] == "chain_worker.write_hash")["kwargs"]["idempotency_key"]
+
+    resp = client.post(f"/documents/{doc_id}/retry-chain-write", headers=auth_headers(admin_token))
+
+    assert resp.status_code == 200
+    assert resp.json()["retry_enqueued"] is True
+    retry_jobs = [j for j in fake_queue.enqueued if j["task_name"] == "chain_worker.write_hash"]
+    assert len(retry_jobs) == 2  # original upload + this retry
+    assert retry_jobs[1]["kwargs"]["idempotency_key"] == original_key  # same key, not a fresh one
+
+
+def test_retry_chain_write_is_a_noop_once_already_confirmed(client, make_user, db_session, fake_queue):
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    make_user("config_admin", email="admin@example.com", password="pw", org=io.organization)
+    admin_token = login(client, "admin@example.com", "pw").json()["access_token"]
+
+    doc_id = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("statement.txt", b"content", "text/plain")},
+        headers=auth_headers(io_token),
+    ).json()["id"]
+    document = db_session.get(models.Document, UUID(doc_id))
+    document.chain_status = "confirmed"
+    db_session.commit()
+    fake_queue.enqueued.clear()
+
+    resp = client.post(f"/documents/{doc_id}/retry-chain-write", headers=auth_headers(admin_token))
+
+    assert resp.status_code == 200
+    assert resp.json()["retry_enqueued"] is False
+    assert fake_queue.enqueued == []
+
+
+def test_only_config_admin_can_trigger_retry_chain_write(client, make_user, db_session):
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    doc_id = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("statement.txt", b"content", "text/plain")},
+        headers=auth_headers(io_token),
+    ).json()["id"]
+
+    resp = client.post(f"/documents/{doc_id}/retry-chain-write", headers=auth_headers(io_token))
+
+    assert resp.status_code == 403
 
 
 def test_redact_tag_adds_a_correction_and_extends_the_audit_hash_chain(client, make_user, db_session):

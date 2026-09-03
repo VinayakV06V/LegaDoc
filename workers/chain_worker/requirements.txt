@@ -2,8 +2,18 @@ celery==5.4.0
 redis==5.0.8
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
-# Hyperledger Fabric's Python SDK is community-maintained and its PyPI packaging
+pydantic-settings==2.5.2
+# Needed because this worker imports api/app directly (see worker.py's
+# sys.path insertion) to reuse the API's own models/database/audit code
+# instead of duplicating the schema — those imports pull in python-jose
+# and bcrypt transitively even though the Chain Worker never issues tokens.
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.0
+
+# Hyperledger Fabric's Python SDK — community-maintained, its PyPI packaging
 # has shifted over time (commonly published as `hfc`). Confirm the current
 # package name/version against https://github.com/hyperledger/fabric-sdk-py
-# before pinning it here — this is exactly the SDK-maturity risk SYSTEM_DESIGN.md
-# flags explicitly for this worker.
+# before pinning it here — this is exactly the SDK-maturity risk
+# SYSTEM_DESIGN.md flags explicitly for this worker, and fabric_client.py's
+# own docstring has more detail on what to verify once this is installed.
+# hfc

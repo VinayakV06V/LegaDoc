@@ -9,6 +9,19 @@ venv/
 # LocalObjectStorage's dev-mode file store — never committed, see app/storage.py
 api/data/
 
+# Fabric local dev/test crypto material and generated connection profiles —
+# never real production keys, but never committed either. See fabric-network/README.md.
+fabric-network/connection-profile.json
+fabric-network/organizations/
+fabric-network/*.pem
+fabric-network/*.key
+
+# Go build artifacts, if the chaincode is ever built locally — a single
+# `*` (one path segment) here, not `**`, which would also match (and hide)
+# the hashledger/ SOURCE directory itself since `**` matches zero segments too.
+fabric-network/chaincode/*/hashledger
+fabric-network/chaincode/*/*.exe
+
 # Node / React
 node_modules/
 dist/

@@ -32,12 +32,14 @@ the document upload path are real, working, and tested.
 | Auth (`login`/`refresh`/`logout`) | **Working.** Constant-time login, 15-min access + 7-day refresh tokens, `jti`/`iat` on every token |
 | Case creation + IO assignment + case-level RBAC | **Working.** `POST /cases`, `POST /cases/:id/assign-io`, and `GET /cases/:id` enforce CaseAssignment for IOs — closes the CRITICAL "any IO can browse any case" finding |
 | Document upload + redaction view | **Working.** `POST /documents` stores the file, hashes it, dispatches both Flow 2 tracks; `GET /documents/:id` masks tagged spans for non-full-access roles; `POST /documents/:id/redact-tag` adds an officer correction and extends the audit hash chain |
+| `retry-chain-write` | **Working.** Reuses the same deterministic idempotency key (`{document_id}:v{version}`) the original upload used — never mints a new one; a no-op if already confirmed |
+| Chain Worker orchestration | **Working and tested** — `workers/chain_worker/worker.py`'s idempotency/retry/chain_status/audit logic is unit-tested against a *mocked* Fabric boundary (`api/tests/test_chain_worker.py`). The actual Fabric-facing call (`fabric_client.py`) and the chaincode (`fabric-network/chaincode/hashledger`) are unverified — see `fabric-network/README.md` |
 | Audit log hash chain | **Working and verifiable** — `app/audit.py`, one `write_audit_log()` call site, `verify_chain_intact()` recomputes and checks every row |
-| Test suite | **22/22 passing**, in-memory SQLite + a local-disk object store + an in-memory queue double, no Docker/Postgres/Redis/MinIO needed — run with `pytest` from `api/` |
+| Test suite | **29/29 passing**, in-memory SQLite + a local-disk object store + an in-memory queue double, no Docker/Postgres/Redis/MinIO/Fabric needed — run with `pytest` from `api/` |
 | Everything else under `api/app/routers/` | Stubbed, matches the endpoint table 1:1, not yet implemented |
 | DB models | Defined, matches the State Ownership Map; cross-dialect `GUID` type (`app/db_types.py`) so this runs on SQLite for tests and Postgres for real |
-| Workers (OCR / AI Parser / Chain) | Celery tasks registered and correctly dispatched from the API; task **bodies** still stubs — no PaddleOCR/Presidio/Fabric available to verify against in this environment |
-| Fabric network | Not stood up yet — see `fabric-network/README.md`, this is the next real milestone (needs Docker, can't be done in this sandbox) |
+| OCR / AI Parser worker bodies | Stubs, but now with the same DB-access pattern as Chain Worker already wired in (commented-out imports ready to uncomment) — no PaddleOCR/Presidio available to verify a real implementation against in this environment |
+| Fabric network | Chaincode + Chain Worker + a network-setup script are written (see `fabric-network/`) — none of it has run against a real network yet. **This needs Docker + Go, neither available in this sandbox** — standing it up on your own machine and confirming one real signed transaction is still the next real milestone |
 | Web frontend | Routed by domain, pages are placeholders |
 
 ## Running the tests

@@ -47,8 +47,15 @@ services:
     volumes:
       - ./api/app:/app/app
 
+  # ocr_worker, ai_parser_worker, and chain_worker all build from the REPO
+  # ROOT (context: .), not their own directory — each one's Dockerfile
+  # COPYs api/app in as a sibling package so it can reuse the API's own
+  # models/database/audit code instead of duplicating the schema. See any
+  # of their Dockerfiles for the exact reasoning.
   ocr_worker:
-    build: ./workers/ocr_worker
+    build:
+      context: .
+      dockerfile: workers/ocr_worker/Dockerfile
     env_file: .env
     depends_on:
       - redis
@@ -56,14 +63,18 @@ services:
       - minio
 
   ai_parser_worker:
-    build: ./workers/ai_parser_worker
+    build:
+      context: .
+      dockerfile: workers/ai_parser_worker/Dockerfile
     env_file: .env
     depends_on:
       - redis
       - db
 
   chain_worker:
-    build: ./workers/chain_worker
+    build:
+      context: .
+      dockerfile: workers/chain_worker/Dockerfile
     env_file: .env
     depends_on:
       - redis

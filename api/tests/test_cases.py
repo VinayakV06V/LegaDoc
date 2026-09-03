@@ -1,0 +1,129 @@
+"""Case lifecycle + the CRITICAL cross-case access fix.
+
+The single most important test in this file is
+test_unassigned_io_cannot_read_other_ios_case — it's the automated,
+permanent version of the finding "any IO officer could browse any sensitive
+case across the state." A regression here is a real, dangerous leak, not a
+cosmetic bug.
+"""
+
+from tests.conftest import login, auth_headers
+
+
+def _register_fir(client, token, crime_type="Theft"):
+    resp = client.post(
+        "/cases",
+        json={"crime_type": crime_type, "complaint_text": "Something was stolen."},
+        headers=auth_headers(token),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def test_duty_officer_can_register_a_fir(client, make_user):
+    make_user("duty_officer", email="duty@example.com", password="pw")
+    token = login(client, "duty@example.com", "pw").json()["access_token"]
+
+    case = _register_fir(client, token, crime_type="Theft")
+
+    assert case["crime_type"] == "Theft"
+    assert case["investigation_status"] == "FIR_Registered"
+    assert case["case_number"].startswith("THE-")
+
+
+def test_only_duty_officer_can_register_a_fir(client, make_user):
+    make_user("io", email="io@example.com", password="pw")
+    token = login(client, "io@example.com", "pw").json()["access_token"]
+
+    resp = client.post(
+        "/cases",
+        json={"crime_type": "Theft", "complaint_text": "..."},
+        headers=auth_headers(token),
+    )
+
+    assert resp.status_code == 403
+
+
+def test_sho_can_assign_io_and_assigned_io_can_then_read_the_case(client, make_user):
+    duty = make_user("duty_officer", email="duty@example.com", password="pw")
+    sho = make_user("sho", email="sho@example.com", password="pw", org=duty.organization)
+    io = make_user("io", email="io@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho_token = login(client, "sho@example.com", "pw").json()["access_token"]
+    assign_resp = client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+    assert assign_resp.status_code == 201, assign_resp.text
+
+    io_token = login(client, "io@example.com", "pw").json()["access_token"]
+    get_resp = client.get(f"/cases/{case['id']}", headers=auth_headers(io_token))
+
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == case["id"]
+
+
+def test_unassigned_io_cannot_read_other_ios_case(client, make_user):
+    """THE critical regression test. An IO with zero connection to a case
+    must get 403, not the case file, no matter how the request is shaped."""
+    duty = make_user("duty_officer", email="duty@example.com", password="pw")
+    sho = make_user("sho", email="sho@example.com", password="pw", org=duty.organization)
+    assigned_io = make_user("io", email="io1@example.com", password="pw", org=duty.organization)
+    other_io = make_user("io", email="io2@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token, crime_type="SexualAssault")
+
+    sho_token = login(client, "sho@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(assigned_io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    other_io_token = login(client, "io2@example.com", "pw").json()["access_token"]
+    resp = client.get(f"/cases/{case['id']}", headers=auth_headers(other_io_token))
+
+    assert resp.status_code == 403
+
+
+def test_io_list_cases_only_shows_assigned_cases(client, make_user):
+    duty = make_user("duty_officer", email="duty@example.com", password="pw")
+    sho = make_user("sho", email="sho@example.com", password="pw", org=duty.organization)
+    io = make_user("io", email="io@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty@example.com", "pw").json()["access_token"]
+    assigned_case = _register_fir(client, duty_token, crime_type="Theft")
+    unassigned_case = _register_fir(client, duty_token, crime_type="Robbery")
+
+    sho_token = login(client, "sho@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{assigned_case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    io_token = login(client, "io@example.com", "pw").json()["access_token"]
+    resp = client.get("/cases", headers=auth_headers(io_token))
+
+    assert resp.status_code == 200
+    ids = {c["id"] for c in resp.json()}
+    assert assigned_case["id"] in ids
+    assert unassigned_case["id"] not in ids
+
+
+def test_config_admin_sees_every_case_regardless_of_assignment(client, make_user):
+    duty = make_user("duty_officer", email="duty@example.com", password="pw")
+    make_user("config_admin", email="admin@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    admin_token = login(client, "admin@example.com", "pw").json()["access_token"]
+    resp = client.get(f"/cases/{case['id']}", headers=auth_headers(admin_token))
+
+    assert resp.status_code == 200

@@ -12,14 +12,14 @@ import uuid
 from sqlalchemy import (
     Column, String, Integer, Boolean, ForeignKey, DateTime, Text, JSON, Enum, func
 )
-from sqlalchemy.dialects.postgresql import UUID
+from app.db_types import GUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
 
 
 def uuid_pk():
-    return Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    return Column(GUID(), primary_key=True, default=uuid.uuid4)
 
 
 class Organization(Base):
@@ -36,7 +36,7 @@ class Organization(Base):
 class User(Base):
     __tablename__ = "users"
     id = uuid_pk()
-    org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    org_id = Column(GUID(), ForeignKey("organizations.id"), nullable=False)
     # duty_officer | sho | io | women_cell | cyber_cell | narcotics_police | traffic_police |
     # crime_scene_unit | rescue_team | counselor | authority_staff | prosecutor | court |
     # defense | config_admin | security_auditor | records_ncrb_analyst
@@ -70,15 +70,15 @@ class CaseAssignment(Base):
     """Current IO for a case. History of reassignment lives in AuditLog, not here."""
     __tablename__ = "case_assignments"
     id = uuid_pk()
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
-    io_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    case_id = Column(GUID(), ForeignKey("cases.id"), nullable=False)
+    io_user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
     assigned_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class Document(Base):
     __tablename__ = "documents"
     id = uuid_pk()
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
+    case_id = Column(GUID(), ForeignKey("cases.id"), nullable=False)
     doc_type = Column(String, nullable=False)  # one of the 57 canonical types
     version = Column(Integer, nullable=False, default=1)  # append-only — never overwritten
     storage_path = Column(String, nullable=False)  # MinIO key: {org_id}/{case_id}/{doc_id}/v{version}
@@ -89,7 +89,7 @@ class Document(Base):
     chain_status = Column(String, nullable=False, default="pending")  # pending | confirmed | failed
     schema_version = Column(Integer, nullable=False, default=1)  # which DocumentSchema revision tagged this
     retention_legal_hold = Column(Boolean, nullable=False, default=False)  # blocks any future deletion/archival
-    uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    uploaded_by = Column(GUID(), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -97,7 +97,7 @@ class DocumentSensitivityTag(Base):
     """AI Parser auto-tags (or an officer's redact-tag correction) — never the raw redacted text."""
     __tablename__ = "document_sensitivity_tags"
     id = uuid_pk()
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
+    document_id = Column(GUID(), ForeignKey("documents.id"), nullable=False)
     entity_type = Column(String, nullable=False)  # e.g. PERSON, PHONE_NUMBER, MEDICAL_CONDITION
     span_start = Column(Integer, nullable=False)
     span_end = Column(Integer, nullable=False)
@@ -114,8 +114,8 @@ class DocumentSensitivityTag(Base):
 class EvidenceRequest(Base):
     __tablename__ = "evidence_requests"
     id = uuid_pk()
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
-    requested_org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    case_id = Column(GUID(), ForeignKey("cases.id"), nullable=False)
+    requested_org_id = Column(GUID(), ForeignKey("organizations.id"), nullable=False)
     doc_type_expected = Column(String, nullable=True)
     status = Column(String, nullable=False, default="requested")  # requested | completed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -125,7 +125,7 @@ class EvidenceRequest(Base):
 class BailRecord(Base):
     __tablename__ = "bail_records"
     id = uuid_pk()
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
+    case_id = Column(GUID(), ForeignKey("cases.id"), nullable=False)
     # Arrested -> Application_Filed -> Hearing_Scheduled -> Order_Issued -> Surety_Registered
     # terminal alternates: Denied_Final | Absconded
     stage = Column(String, nullable=False)
@@ -138,8 +138,8 @@ class CaseDiaryEntry(Base):
     SYSTEM_DESIGN.md, "Case Diary now routes through the redaction pipeline")."""
     __tablename__ = "case_diary_entries"
     id = uuid_pk()
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
-    author_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    case_id = Column(GUID(), ForeignKey("cases.id"), nullable=False)
+    author_user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
     text = Column(Text, nullable=False)
     status = Column(String, nullable=False, default="processing")  # processing | ready
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -159,7 +159,7 @@ class RecognizerMapping(Base):
     """Maps a Presidio/spaCy entity type to a DocumentSchema's sensitivity field."""
     __tablename__ = "recognizer_mappings"
     id = uuid_pk()
-    document_schema_id = Column(UUID(as_uuid=True), ForeignKey("document_schemas.id"), nullable=False)
+    document_schema_id = Column(GUID(), ForeignKey("document_schemas.id"), nullable=False)
     entity_type = Column(String, nullable=False)
     field_name = Column(String, nullable=False)
 
@@ -193,11 +193,11 @@ class AuditLog(Base):
     """
     __tablename__ = "audit_log"
     id = uuid_pk()
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=True)
-    actor_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)  # null = system:ai_parser
+    case_id = Column(GUID(), ForeignKey("cases.id"), nullable=True)
+    actor_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)  # null = system:ai_parser
     action = Column(String, nullable=False)
     target_type = Column(String, nullable=True)  # e.g. "document", "case", "bail_record"
-    target_id = Column(UUID(as_uuid=True), nullable=True)
+    target_id = Column(GUID(), nullable=True)
     action_metadata = Column(JSON, nullable=True)  # never the raw redacted text — see design doc
     prev_hash = Column(String, nullable=True)
     row_hash = Column(String, nullable=False)

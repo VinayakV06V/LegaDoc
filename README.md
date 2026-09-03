@@ -23,22 +23,34 @@ parallel development. Ask if you need either regenerated.
 
 ## Current build status
 
-This is a **baseline scaffold**, not a working product yet. Every endpoint
-in `api/app/routers/` exists as a real route with the correct method, path,
-role restriction, and docstring — but returns `501 Not Implemented`. Every
-worker has a real Celery task registered with a docstring describing exactly
-what it needs to do. Nothing has business logic wired in yet. That's
-intentional: this is the shape for each domain to build into, not a finished
-skeleton to work around.
+Most endpoints are still stubs — real route, correct method/path/role
+restriction/docstring, but `501 Not Implemented`. **Auth and the CRITICAL
+cross-case-access fix are real, working, and tested** — that was the
+deliberate first slice, since it's what SYSTEM_DESIGN.md itself names as the
+top testing priority and it's what every other role-scoped endpoint will
+build on.
 
 | Piece | Status |
 |---|---|
-| API routes | Stubbed, matches the endpoint table 1:1 |
-| DB models | Defined, matches the State Ownership Map |
+| Auth (`login`/`refresh`/`logout`) | **Working.** Constant-time login, 15-min access + 7-day refresh tokens, `jti`/`iat` on every token |
+| Case creation + IO assignment + case-level RBAC | **Working.** `POST /cases`, `POST /cases/:id/assign-io`, and `GET /cases/:id` enforce CaseAssignment for IOs — closes the CRITICAL "any IO can browse any case" finding |
+| Test suite | **13/13 passing**, in-memory SQLite, no Docker/Postgres needed — run with `pytest` from `api/` |
+| Everything else under `api/app/routers/` | Stubbed, matches the endpoint table 1:1, not yet implemented |
+| DB models | Defined, matches the State Ownership Map; cross-dialect `GUID` type (see `app/db_types.py`) so this runs on SQLite for tests and Postgres for real |
 | Workers (OCR / AI Parser / Chain) | Celery tasks registered, logic not implemented |
-| Fabric network | Not stood up yet — see `fabric-network/README.md`, this is the first real milestone |
+| Fabric network | Not stood up yet — see `fabric-network/README.md`, this is the next real milestone |
 | Web frontend | Routed by domain, pages are placeholders |
-| Auth / RBAC | JWT issue/verify works; the login flow itself (`POST /auth/login`) is not implemented |
+
+## Running the tests
+
+```bash
+cd api
+pip install -r requirements.txt pytest httpx
+pytest -v
+```
+
+No Docker, no Postgres, no Redis needed — the suite runs against an
+in-memory SQLite database created fresh for every test.
 
 ## Repository layout
 

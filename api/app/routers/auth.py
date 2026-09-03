@@ -1,47 +1,65 @@
-"""Auth & Org — see SYSTEM_DESIGN.md Interface Contracts, "Endpoint Table"."""
+"""Auth — see SYSTEM_DESIGN.md Interface Contracts, "Endpoint Table", and
+the Security section's login-hardening rules."""
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app import models, schemas, security
+from app.database import get_db
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/login")
-def login():
-    """POST /auth/login — Public. Issue an access token (15 min TTL) + a
-    refresh token (7 days).
+@router.post("/login", response_model=schemas.TokenResponse)
+def login(body: schemas.LoginRequest, db: Session = Depends(get_db)):
+    """POST /auth/login — Public. Issue an access token (15 min) + refresh
+    token (7 days).
 
-    TODO, in order:
-      1. Rate-limit this endpoint specifically — settings.LOGIN_RATE_LIMIT
-         (10/minute per IP). This is the one truly public-facing surface in
-         the system; it gets the strictest limit.
-      2. Look up the user by email.
-      3. Run bcrypt.checkpw against the stored hash — AND, if the email
-         doesn't exist, run a dummy bcrypt check against a fixed hash anyway.
-         Skipping the dummy check on an unknown email makes response timing
-         distinguish "no such officer" from "wrong password," which lets an
-         attacker enumerate valid police accounts one timing measurement at
-         a time. Both paths must take the same time.
-      4. On success, call security.create_access_token + a matching refresh
-         token; on failure, a generic "invalid credentials" error — never
-         reveal which of email/password was wrong.
+    Constant-time on purpose: an unknown email still runs a bcrypt check
+    (against a placeholder hash, see security.DUMMY_HASH) so response timing
+    can't be used to enumerate which emails belong to real officer accounts.
+    Same generic error either way — never reveal which of email/password
+    was wrong.
+
+    NOTE: real IP-based rate limiting (settings.LOGIN_RATE_LIMIT, 10/min)
+    belongs at the ASGI middleware layer, not in this handler — not wired
+    into this baseline yet.
     """
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    user = db.query(models.User).filter(models.User.email == body.email).first()
+
+    if user is None:
+        security.dummy_password_check(body.password)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    if not security.verify_password(body.password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    org_id = str(user.org_id)
+    return schemas.TokenResponse(
+        access_token=security.create_access_token(str(user.id), org_id, user.role),
+        refresh_token=security.create_refresh_token(str(user.id), org_id, user.role),
+    )
 
 
-@router.post("/refresh")
-def refresh_token():
+@router.post("/refresh", response_model=schemas.AccessTokenResponse)
+def refresh_token(body: schemas.RefreshRequest):
     """POST /auth/refresh — Exchange a valid refresh token for a new access
     token. Not in the original endpoint table — added because a 15-minute
     access-token TTL is unusable without this."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    claims = security.decode_token(body.refresh_token, expected_type="refresh")
+    new_access = security.create_access_token(claims["sub"], claims["org_id"], claims["role"])
+    return schemas.AccessTokenResponse(access_token=new_access)
 
 
 @router.post("/logout")
-def logout():
-    """POST /auth/logout — Not in the original endpoint table. TODO once
-    token revocation exists: write the current access token's JTI to the
-    Redis revocation set (settings.TOKEN_REVOCATION_REDIS_DB) with a TTL
-    matching its remaining lifetime, so a shared-device logout actually
-    invalidates the session instead of just discarding the client-side copy.
+def logout(claims: dict = Depends(security.get_current_claims)):
+    """POST /auth/logout — Not in the original endpoint table.
+
+    Baseline behavior: stateless. The 15-minute access-token TTL bounds the
+    exposure window on its own. LATER (see SYSTEM_DESIGN.md): write the
+    token's JTI to a Redis revocation set with a TTL matching its remaining
+    lifetime, so a shared-device logout invalidates the session immediately
+    instead of waiting out the TTL — not built here since this baseline has
+    no live Redis to check against.
     """
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    return {"status": "logged out"}

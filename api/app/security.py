@@ -1,41 +1,113 @@
 """
-JWT issuance/verification and the RBAC dependency every protected route uses.
-This is the ONE place role/org checks happen — per SYSTEM_DESIGN.md's B2B
-multi-tenant overlay, don't reinvent this per-endpoint.
-
-Stubbed for the baseline: encode/decode work, but there's no real password
-hashing or login flow wired up yet — that's real work for whoever picks up
-POST /auth/login.
+JWT issuance/verification, password hashing, and the RBAC dependencies every
+protected route uses. This is the ONE place role/org/case-assignment checks
+happen — per SYSTEM_DESIGN.md's B2B multi-tenant overlay, don't reinvent
+this per-endpoint.
 """
 
-from datetime import datetime, timedelta
-from typing import Iterable
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.database import get_db
+from app import models
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
+# Plain `bcrypt`, not passlib's CryptContext — passlib's bcrypt backend
+# detection has a real, live incompatibility with recent bcrypt releases
+# (its own internal self-test trips bcrypt's 72-byte limit check and raises).
+# This system only ever needs bcrypt, never passlib's multi-scheme support,
+# so calling bcrypt directly removes the dependency conflict entirely rather
+# than pinning around it.
+_BCRYPT_MAX_BYTES = 72  # bcrypt's own hard limit — truncate rather than error
 
-def create_access_token(user_id: str, org_id: str, role: str) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
-    payload = {"sub": user_id, "org_id": org_id, "role": role, "exp": expire}
+
+def _prepare(plain: str) -> bytes:
+    return plain.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(_prepare(plain), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(_prepare(plain), hashed.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+# Computed once at import time, not hand-typed — a hand-typed "fake bcrypt
+# string" is exactly the kind of fabricated-looking constant that's either
+# invalid or silently wrong. Checking an unknown email against this (instead
+# of skipping the check entirely) makes "no such officer" and "wrong
+# password" take the same amount of time — see SYSTEM_DESIGN.md,
+# "Constant-time login". No real password corresponds to it.
+DUMMY_HASH = hash_password("no-such-user-timing-placeholder")
+
+
+def dummy_password_check(plain: str) -> None:
+    """Burns the same time a real bcrypt check would, for an email that
+    doesn't exist. The result is discarded — this call exists only for its
+    timing, not its answer."""
+    verify_password(plain, DUMMY_HASH)
+
+
+def _create_token(user_id: str, org_id: str, role: str, expires_delta: timedelta, token_type: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "org_id": org_id,
+        "role": role,
+        "type": token_type,
+        "iat": now,
+        "exp": now + expires_delta,
+        # Unique per issuance — this is the identifier the planned Redis JTI
+        # denylist (see SYSTEM_DESIGN.md, token revocation LATER item) would
+        # key off. Also means two tokens issued in the same second are never
+        # byte-identical, which matters for e.g. an audit trail distinguishing them.
+        "jti": uuid4().hex,
+    }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
-def decode_token(token: str) -> dict:
+def create_access_token(user_id: str, org_id: str, role: str) -> str:
+    return _create_token(user_id, org_id, role, timedelta(minutes=settings.JWT_EXPIRE_MINUTES), "access")
+
+
+def create_refresh_token(user_id: str, org_id: str, role: str) -> str:
+    return _create_token(user_id, org_id, role, timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS), "refresh")
+
+
+def decode_token(token: str, expected_type: str = "access") -> dict:
     try:
-        return jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    if payload.get("type") != expected_type:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Expected a {expected_type} token")
+    return payload
 
 
 def get_current_claims(token: str = Depends(oauth2_scheme)) -> dict:
     """Every protected endpoint depends on this (directly or via require_role)."""
-    return decode_token(token)
+    return decode_token(token, expected_type="access")
+
+
+def get_current_user(claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)) -> models.User:
+    """Loads the actual User row — needed for anything that checks case
+    assignment or other DB-backed relationships, not just the role string."""
+    user = db.get(models.User, UUID(claims["sub"]))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User no longer exists")
+    return user
 
 
 def require_role(*allowed_roles: str):
@@ -51,3 +123,38 @@ def require_role(*allowed_roles: str):
         return claims
 
     return _check
+
+
+# Roles that see every case regardless of assignment — see SYSTEM_DESIGN.md's
+# Access Model. Everyone else (IO, specifically) must have a CaseAssignment
+# row for this exact case, or a Court order that touches it.
+_UNRESTRICTED_CASE_ROLES = {"config_admin", "security_auditor", "court", "prosecutor", "sho"}
+
+
+def verify_case_access(case_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)) -> dict:
+    """Closes the CRITICAL finding: role-only authorization let any IO browse
+    any case, including sensitive ones with no connection to their actual
+    assignment. An IO must have a CaseAssignment row for this case_id, or
+    this returns 403 — cross-case reads must never silently succeed.
+    """
+    role = claims.get("role")
+    if role in _UNRESTRICTED_CASE_ROLES:
+        return claims
+    if role == "io":
+        user_id = UUID(claims["sub"])
+        try:
+            case_uuid = UUID(case_id)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+        assigned = (
+            db.query(models.CaseAssignment)
+            .filter(models.CaseAssignment.case_id == case_uuid, models.CaseAssignment.io_user_id == user_id)
+            .first()
+        )
+        if assigned is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this case")
+        return claims
+    # Every other role (Defense, external authorities, etc.) reaches this
+    # dependency only from endpoints that shouldn't be granting general case
+    # access in the first place — deny by default rather than silently allow.
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role not permitted to read case files directly")

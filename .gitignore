@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+
+# LocalObjectStorage's dev-mode file store — never committed, see app/storage.py
+api/data/
 
 # Node / React
 node_modules/

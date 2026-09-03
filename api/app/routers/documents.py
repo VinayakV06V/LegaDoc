@@ -1,79 +1,263 @@
 """Documents — see SYSTEM_DESIGN.md Flow 2 (the core technical differentiator:
-upload -> OCR -> AI Parser redaction -> blockchain hash-write, two parallel tracks)."""
+upload -> OCR -> AI Parser redaction -> blockchain hash-write, two parallel tracks).
 
+Scope actually implemented in this pass: upload (storage + DB row + job
+dispatch), read with redaction-view masking, versions, chain-status, and the
+officer correction path (redact-tag). The OCR/AI-Parser/Chain Worker task
+BODIES stay stubs (workers/*/worker.py) — this environment has no PaddleOCR
+model, no Presidio/spaCy model, and no Fabric network to verify them
+against. `needs_review` filtering and retry-chain-write remain stubs too,
+deliberately deferred to keep this slice fully tested rather than partially
+faked.
+"""
+
+import uuid
 from typing import Optional
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from sqlalchemy.orm import Session
 
-from app.security import require_role, get_current_claims
+from app import models, schemas
+from app.audit import write_audit_log
+from app.database import get_db
+from app.queue import QueueClient, get_queue
+from app.redaction import get_document_view
+from app.security import FULL_TEXT_ACCESS_ROLES, assert_case_access, get_current_claims, require_role
+from app.storage import ObjectStorage, get_storage, object_key, sha256_hex
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
+# Rough, baseline-only classification — a real implementation should sniff
+# actual file content (python-magic), not trust the declared content-type.
+# See SYSTEM_DESIGN.md's input-validation rules: MIME spoofing via
+# extension/declared type is a known, real attack surface, not addressed here.
+_BINARY_EVIDENCE_PREFIXES = ("video/", "audio/")
+_BINARY_EVIDENCE_TYPES = {"application/octet-stream"}
 
-@router.post("")
-def upload_document(claims: dict = Depends(get_current_claims)):
-    """POST /documents — Role permitted for that case/doc-type. Upload document
-    or binary evidence. TODO: store raw file in Object Storage, create a
-    Document row (status=processing), enqueue the hash-write job AND (for
-    text-bearing docs) the OCR job — both in parallel, per Flow 2. Return 202.
+
+def _is_binary_evidence(content_type: Optional[str]) -> bool:
+    if not content_type:
+        return False
+    return content_type in _BINARY_EVIDENCE_TYPES or any(content_type.startswith(p) for p in _BINARY_EVIDENCE_PREFIXES)
+
+
+def _next_version(db: Session, case_id: UUID, doc_type: str) -> int:
+    latest = (
+        db.query(models.Document)
+        .filter(models.Document.case_id == case_id, models.Document.doc_type == doc_type)
+        .order_by(models.Document.version.desc())
+        .first()
+    )
+    return (latest.version + 1) if latest else 1
+
+
+@router.post("", response_model=schemas.DocumentUploadResponse, status_code=status.HTTP_202_ACCEPTED)
+async def upload_document(
+    case_id: str = Form(...),
+    doc_type: str = Form(...),
+    file: UploadFile = File(...),
+    claims: dict = Depends(get_current_claims),
+    db: Session = Depends(get_db),
+    storage: ObjectStorage = Depends(get_storage),
+    queue_client: QueueClient = Depends(get_queue),
+):
+    """POST /documents — multipart. Upload document or binary evidence.
+
+    Scope note on "role permitted for that case/doc-type": this baseline
+    checks case-level access (assert_case_access) but not the finer-grained
+    per-doc-type permission the full Access Model implies — any role with
+    access to the case can upload any doc_type for now.
+
+    Track A (hashing) and Track B (OCR, text-bearing only) are both
+    enqueued here, matching Flow 2 — they run independently, neither
+    blocks this response. Binary evidence skips Track B entirely and goes
+    straight to status="ready" with metadata-only tagging (there's nothing
+    to redact in a video file's bytes).
     """
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    try:
+        case_uuid = UUID(case_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Case not found")
+
+    case = db.get(models.Case, case_uuid)
+    if case is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Case not found")
+
+    assert_case_access(case_uuid, claims, db)
+
+    data = await file.read()
+    doc_hash = sha256_hex(data)
+    version = _next_version(db, case_uuid, doc_type)
+    doc_id = uuid.uuid4()
+    is_binary = _is_binary_evidence(file.content_type)
+
+    user = db.get(models.User, UUID(claims["sub"]))
+    org_id = user.org_id if user else case_uuid  # fallback keeps the path stable even if user lookup ever fails
+
+    key = object_key(org_id, case_uuid, doc_id, version)
+    storage.put(key, data)
+
+    document = models.Document(
+        id=doc_id,
+        case_id=case_uuid,
+        doc_type=doc_type,
+        version=version,
+        storage_path=key,
+        doc_hash=doc_hash,
+        status="ready" if is_binary else "processing",
+        chain_status="pending",
+        uploaded_by=UUID(claims["sub"]),
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    # Track A — always, independent of Track B. See System Connections #8.
+    queue_client.enqueue("chain_worker.write_hash", document_id=str(document.id))
+    # Track B — text-bearing documents only. See System Connections #6.
+    if not is_binary:
+        queue_client.enqueue("ocr_worker.extract_document", document_id=str(document.id))
+
+    write_audit_log(
+        db,
+        action="document_uploaded",
+        case_id=case_uuid,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"doc_type": doc_type, "version": version, "content_type": file.content_type, "is_binary": is_binary},
+    )
+
+    return document
 
 
 @router.get("")
-def list_documents(
+def list_documents_needing_review(
     status_filter: Optional[str] = Query(default=None, alias="status"),
     claims: dict = Depends(require_role("config_admin", "io")),
 ):
     """GET /documents?status=needs_review — Config Admin / Investigating
-    Officer. List documents where the AI Parser fell back to fully-redacted
-    after repeated failure. Plain filtered query on the documents table. An
-    IO should only see this for their own assigned cases — filter by
-    CaseAssignment in the implementation, require_role alone isn't enough.
-    Surface age + count on this queue in the UI — a stuck backlog that's
-    invisible is as bad as no fail-safe at all.
-    """
+    Officer. Not implemented in this pass — deferred alongside the AI
+    Parser worker itself, since a document can only reach needs_review
+    through a pipeline stage (real Presidio/spaCy tagging) that isn't wired
+    up in this environment."""
     raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
 
 
-@router.get("/{document_id}")
-def get_document(document_id: str, claims: dict = Depends(get_current_claims)):
-    """GET /documents/:id — Role-filtered. Returns redacted or full view per
-    auto-tagged sensitivity spans + role."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+@router.get("/{document_id}", response_model=schemas.DocumentView)
+def get_document(document_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)):
+    """GET /documents/:id — Role-filtered. Returns the redacted or full view
+    per auto-tagged sensitivity spans + role, via app.redaction — never a
+    bespoke redacted-vs-full branch written ad hoc in this handler."""
+    document = db.get(models.Document, UUID(document_id))
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    tags = db.query(models.DocumentSensitivityTag).filter(models.DocumentSensitivityTag.document_id == document.id).all()
+    view = get_document_view(document, tags, claims.get("role"), FULL_TEXT_ACCESS_ROLES)
+
+    return schemas.DocumentView(
+        id=document.id,
+        case_id=document.case_id,
+        doc_type=document.doc_type,
+        version=document.version,
+        status=document.status,
+        chain_status=document.chain_status,
+        text=view["text"],
+    )
 
 
-@router.get("/{document_id}/versions")
-def get_document_versions(document_id: str, claims: dict = Depends(get_current_claims)):
+@router.get("/{document_id}/versions", response_model=list[schemas.DocumentVersionSummary])
+def get_document_versions(document_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)):
     """GET /documents/:id/versions — Role-filtered. Version history.
     Append-only — originals never overwritten."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    document = db.get(models.Document, UUID(document_id))
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    return (
+        db.query(models.Document)
+        .filter(models.Document.case_id == document.case_id, models.Document.doc_type == document.doc_type)
+        .order_by(models.Document.version.asc())
+        .all()
+    )
 
 
-@router.get("/{document_id}/chain-status")
-def get_chain_status(document_id: str, claims: dict = Depends(get_current_claims)):
+@router.get("/{document_id}/chain-status", response_model=schemas.ChainStatusResponse)
+def get_chain_status(document_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)):
     """GET /documents/:id/chain-status — Role-filtered. Poll blockchain
     confirmation. Short-poll target for Flow 2."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    document = db.get(models.Document, UUID(document_id))
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    return schemas.ChainStatusResponse(document_id=document.id, chain_status=document.chain_status)
 
 
 @router.post("/{document_id}/retry-chain-write")
 def retry_chain_write(document_id: str, claims: dict = Depends(require_role("config_admin"))):
-    """POST /documents/:id/retry-chain-write — Config Admin. Manually
-    re-trigger a stuck chain-write. MUST reuse the original idempotency key
-    from the failed attempt, never mint a new one — if Fabric actually
-    confirmed the transaction before the crash, this guarantees no duplicate
-    ledger entry. This is one of the "riskiest actions" flagged for
-    second-person confirmation before it fires in a real deployment.
+    """POST /documents/:id/retry-chain-write — Config Admin. Not
+    implemented in this pass — there's no live Chain Worker/Fabric network
+    in this environment to actually retry against yet. MUST reuse the
+    original idempotency key when this is built (see SYSTEM_DESIGN.md)."""
+    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+
+
+@router.post("/{document_id}/redact-tag", response_model=schemas.DocumentView)
+def correct_redaction_tag(
+    document_id: str,
+    body: schemas.RedactTagRequest,
+    claims: dict = Depends(require_role("io")),
+    db: Session = Depends(get_db),
+):
+    """POST /documents/:id/redact-tag — Investigating Officer (assigned to
+    this document's case — checked via assert_case_access, role alone isn't
+    enough). Correct/override an AI Parser sensitivity tag. Writes an
+    audit_log entry recording the span that was corrected — never the
+    underlying text, same rule as every other tag write in this system.
     """
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    document = db.get(models.Document, UUID(document_id))
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
 
+    assert_case_access(document.case_id, claims, db)
 
-@router.post("/{document_id}/redact-tag")
-def correct_redaction_tag(document_id: str, claims: dict = Depends(require_role("io"))):
-    """POST /documents/:id/redact-tag — Investigating Officer (the IO
-    assigned to this document's case — check CaseAssignment, role alone
-    isn't enough). Correct/override an AI Parser sensitivity tag. This is a
-    correction path over the AI Parser's auto-tags, not the primary tagging
-    mechanism."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    tag = models.DocumentSensitivityTag(
+        document_id=document.id,
+        entity_type=body.entity_type,
+        span_start=body.span_start,
+        span_end=body.span_end,
+        confidence=None,
+        source="officer_correction",
+    )
+    db.add(tag)
+    db.commit()
+
+    write_audit_log(
+        db,
+        action="redact_tag_correction",
+        case_id=document.case_id,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"entity_type": body.entity_type, "span_start": body.span_start, "span_end": body.span_end},
+    )
+
+    tags = db.query(models.DocumentSensitivityTag).filter(models.DocumentSensitivityTag.document_id == document.id).all()
+    view = get_document_view(document, tags, claims.get("role"), FULL_TEXT_ACCESS_ROLES)
+    return schemas.DocumentView(
+        id=document.id,
+        case_id=document.case_id,
+        doc_type=document.doc_type,
+        version=document.version,
+        status=document.status,
+        chain_status=document.chain_status,
+        text=view["text"],
+    )

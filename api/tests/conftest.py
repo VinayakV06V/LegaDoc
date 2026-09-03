@@ -14,6 +14,8 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app import models, security
+from app.queue import InMemoryQueueClient, get_queue
+from app.storage import LocalObjectStorage, get_storage
 
 TEST_ENGINE = create_engine(
     "sqlite:///:memory:",
@@ -42,11 +44,20 @@ def db_session():
 
 
 @pytest.fixture
-def client(db_session):
+def fake_queue():
+    return InMemoryQueueClient()
+
+
+@pytest.fixture
+def client(db_session, fake_queue, tmp_path):
     def _override_get_db():
         yield db_session
 
+    test_storage = LocalObjectStorage(str(tmp_path / "objects"))
+
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_queue] = lambda: fake_queue
+    app.dependency_overrides[get_storage] = lambda: test_storage
     yield TestClient(app)
     app.dependency_overrides.clear()
 

@@ -130,20 +130,33 @@ def require_role(*allowed_roles: str):
 # row for this exact case, or a Court order that touches it.
 _UNRESTRICTED_CASE_ROLES = {"config_admin", "security_auditor", "court", "prosecutor", "sho"}
 
+# Roles that see a document's full, unredacted text once they already have
+# case access — everyone else gets the AI-Parser-tagged spans masked. This
+# is a baseline simplification of the Access Model's real nuance (Duty
+# Officer is actually restricted to FIR-registration fields only; External
+# Authority is restricted to their own routed request) — full per-role,
+# per-doc-type scoping is real future work, not built in this slice.
+FULL_TEXT_ACCESS_ROLES = _UNRESTRICTED_CASE_ROLES | {"io"}
 
-def verify_case_access(case_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)) -> dict:
-    """Closes the CRITICAL finding: role-only authorization let any IO browse
+
+def assert_case_access(case_id, claims: dict, db: Session) -> None:
+    """The plain (non-Depends) version — call this directly from a route
+    that doesn't have case_id as a path parameter (e.g. a multipart upload
+    where case_id arrives as a form field). Raises HTTPException; returns
+    nothing on success.
+
+    Closes the CRITICAL finding: role-only authorization let any IO browse
     any case, including sensitive ones with no connection to their actual
     assignment. An IO must have a CaseAssignment row for this case_id, or
-    this returns 403 — cross-case reads must never silently succeed.
+    this raises 403 — cross-case reads must never silently succeed.
     """
     role = claims.get("role")
     if role in _UNRESTRICTED_CASE_ROLES:
-        return claims
+        return
     if role == "io":
         user_id = UUID(claims["sub"])
         try:
-            case_uuid = UUID(case_id)
+            case_uuid = case_id if isinstance(case_id, UUID) else UUID(str(case_id))
         except ValueError:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
         assigned = (
@@ -153,8 +166,16 @@ def verify_case_access(case_id: str, claims: dict = Depends(get_current_claims),
         )
         if assigned is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not assigned to this case")
-        return claims
+        return
     # Every other role (Defense, external authorities, etc.) reaches this
-    # dependency only from endpoints that shouldn't be granting general case
+    # check only from endpoints that shouldn't be granting general case
     # access in the first place — deny by default rather than silently allow.
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role not permitted to read case files directly")
+
+
+def verify_case_access(case_id: str, claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)) -> dict:
+    """FastAPI dependency wrapper for routes where case_id IS a path
+    parameter, e.g. GET /cases/:id. See assert_case_access for the logic and
+    for routes that need this check but don't have case_id in the path."""
+    assert_case_access(case_id, claims, db)
+    return claims

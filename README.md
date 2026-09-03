@@ -24,21 +24,20 @@ parallel development. Ask if you need either regenerated.
 ## Current build status
 
 Most endpoints are still stubs — real route, correct method/path/role
-restriction/docstring, but `501 Not Implemented`. **Auth and the CRITICAL
-cross-case-access fix are real, working, and tested** — that was the
-deliberate first slice, since it's what SYSTEM_DESIGN.md itself names as the
-top testing priority and it's what every other role-scoped endpoint will
-build on.
+restriction/docstring, but `501 Not Implemented`. Auth, case-access RBAC, and
+the document upload path are real, working, and tested.
 
 | Piece | Status |
 |---|---|
 | Auth (`login`/`refresh`/`logout`) | **Working.** Constant-time login, 15-min access + 7-day refresh tokens, `jti`/`iat` on every token |
 | Case creation + IO assignment + case-level RBAC | **Working.** `POST /cases`, `POST /cases/:id/assign-io`, and `GET /cases/:id` enforce CaseAssignment for IOs — closes the CRITICAL "any IO can browse any case" finding |
-| Test suite | **13/13 passing**, in-memory SQLite, no Docker/Postgres needed — run with `pytest` from `api/` |
+| Document upload + redaction view | **Working.** `POST /documents` stores the file, hashes it, dispatches both Flow 2 tracks; `GET /documents/:id` masks tagged spans for non-full-access roles; `POST /documents/:id/redact-tag` adds an officer correction and extends the audit hash chain |
+| Audit log hash chain | **Working and verifiable** — `app/audit.py`, one `write_audit_log()` call site, `verify_chain_intact()` recomputes and checks every row |
+| Test suite | **22/22 passing**, in-memory SQLite + a local-disk object store + an in-memory queue double, no Docker/Postgres/Redis/MinIO needed — run with `pytest` from `api/` |
 | Everything else under `api/app/routers/` | Stubbed, matches the endpoint table 1:1, not yet implemented |
-| DB models | Defined, matches the State Ownership Map; cross-dialect `GUID` type (see `app/db_types.py`) so this runs on SQLite for tests and Postgres for real |
-| Workers (OCR / AI Parser / Chain) | Celery tasks registered, logic not implemented |
-| Fabric network | Not stood up yet — see `fabric-network/README.md`, this is the next real milestone |
+| DB models | Defined, matches the State Ownership Map; cross-dialect `GUID` type (`app/db_types.py`) so this runs on SQLite for tests and Postgres for real |
+| Workers (OCR / AI Parser / Chain) | Celery tasks registered and correctly dispatched from the API; task **bodies** still stubs — no PaddleOCR/Presidio/Fabric available to verify against in this environment |
+| Fabric network | Not stood up yet — see `fabric-network/README.md`, this is the next real milestone (needs Docker, can't be done in this sandbox) |
 | Web frontend | Routed by domain, pages are placeholders |
 
 ## Running the tests

@@ -52,3 +52,43 @@ class CaseResponse(BaseModel):
 
 class AssignIORequest(BaseModel):
     io_user_id: UUID
+
+
+# ---------- Documents ----------
+class DocumentUploadResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    doc_type: str
+    version: int
+    status: str
+    chain_status: str
+
+
+class DocumentView(BaseModel):
+    id: UUID
+    case_id: UUID
+    doc_type: str
+    version: int
+    status: str
+    chain_status: str
+    text: Optional[str] = None  # None while status != "ready"; masked or full depending on role
+
+
+class DocumentVersionSummary(BaseModel):
+    id: UUID
+    version: int
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChainStatusResponse(BaseModel):
+    document_id: UUID
+    chain_status: str
+
+
+class RedactTagRequest(BaseModel):
+    entity_type: str
+    span_start: int
+    span_end: int

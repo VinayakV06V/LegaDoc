@@ -6,7 +6,7 @@ import { apiClient } from '../api/client';
 export default function PlatformAdmin() {
   const { user } = useAuth();
   const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState('roles'); // 'roles' | 'schemas' | 'orgs' | 'chain_recovery' | 'parser_audit'
+  const [activeTab, setActiveTab] = useState('roles'); // 'roles' | 'schemas' | 'orgs' | 'chain_recovery' | 'audit_trail'
   const [alert, setAlert] = useState(null);
 
   // ---------- Dynamic Role Management State ----------
@@ -26,38 +26,40 @@ export default function PlatformAdmin() {
   const [selectedUserForAssign, setSelectedUserForAssign] = useState(null);
   const [assignedRoleCode, setAssignedRoleCode] = useState('');
 
-  // ---------- Existing State ----------
-  const [retryDocId, setRetryDocId] = useState('DOC-STUCK-9182');
+  // ---------- Organization Management State ----------
+  const [orgs, setOrgs] = useState([]);
+  const [loadingOrgs, setLoadingOrgs] = useState(false);
+  const [newOrgName, setNewOrgName] = useState('');
+  const [newOrgType, setNewOrgType] = useState('police');
+
+  // ---------- Audit Trail State ----------
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
+  // ---------- Chain Recovery State ----------
+  const [retryDocId, setRetryDocId] = useState('');
   const [confirmInput, setConfirmInput] = useState('');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [chainRetrying, setChainRetrying] = useState(false);
 
-  const [schemas, setSchemas] = useState([
-    { doc_type: 'FIR', sensitivity: 'HIGH', fields: ['informant_name', 'victim_address', 'phone_number'], recognizers: 'Spacy + Presidio NER' },
-    { doc_type: 'Panchnama', sensitivity: 'HIGH', fields: ['panch_witness_identities', 'confidential_location'], recognizers: 'Presidio Custom NER' },
-    { doc_type: 'Forensic_Report', sensitivity: 'RESTRICTED', fields: ['chemical_composition', 'dna_profile'], recognizers: 'FSL Format Validator' },
-    { doc_type: 'Bank_Statement', sensitivity: 'CRITICAL', fields: ['account_number', 'pan_card', 'aadhaar_id'], recognizers: 'India Financial Regex' },
-  ]);
+  // Static reference of redaction baseline in app/redaction.py (Truthful system documentation, not fake DB data)
+  const staticSchemaReference = [
+    { doc_type: 'FIR', sensitivity: 'Tier 1 (High)', fields: ['informant_name', 'victim_address', 'phone_number', 'aadhaar_id'], recognizers: 'Presidio NER + India Regex Pipeline' },
+    { doc_type: 'Panchnama', sensitivity: 'Tier 1 (High)', fields: ['panch_witness_identities', 'confidential_location', 'personal_names'], recognizers: 'Presidio NER + Section 100 CrPC Regex' },
+    { doc_type: 'Forensic_Report', sensitivity: 'Tier 2 (Restricted)', fields: ['chemical_composition', 'dna_profile', 'examiner_signatures'], recognizers: 'FSL Certificate Format Parser' },
+    { doc_type: 'Bank_Statement', sensitivity: 'Tier 1 (High)', fields: ['account_number', 'pan_card', 'ifsc_code', 'upi_vpa'], recognizers: 'India Financial Entity Regex' },
+  ];
 
-  const [orgs, setOrgs] = useState([
-    { id: 'ORG-POLICE-01', name: 'Delhi Police (Crime Branch)', type: 'POLICE', active_users: 142, status: 'ACTIVE' },
-    { id: 'ORG-COURT-01', name: 'Patiala House District Court', type: 'JUDICIARY', active_users: 28, status: 'ACTIVE' },
-    { id: 'ORG-FSL-01', name: 'Central Forensic Science Laboratory (CFSL)', type: 'FORENSIC_LAB', active_users: 19, status: 'ACTIVE' },
-    { id: 'ORG-BANK-01', name: 'HDFC Nodal Fraud Unit', type: 'FINANCIAL', active_users: 8, status: 'ACTIVE' },
-  ]);
-
-  const [newOrgName, setNewOrgName] = useState('');
-  const [newOrgType, setNewOrgType] = useState('POLICE');
-
-  // Fallback initial roles if backend offline
+  // Fallbacks if backend is temporarily disconnected
   const fallbackRoles = [
-    { id: 'r-1', code: 'duty_officer', name: 'Duty Officer (Station Intake)', description: 'FIR intake and initial registration', is_system: true, permission_codes: ['cases:create', 'cases:read', 'documents:upload'], user_count: 14 },
-    { id: 'r-2', code: 'io', name: 'Investigating Officer (IO)', description: 'Assigned investigator with case and evidence access', is_system: true, permission_codes: ['cases:read', 'cases:diary_write', 'documents:upload', 'evidence:request_create'], user_count: 42 },
-    { id: 'r-3', code: 'sho', name: 'Station House Officer (SHO)', description: 'Precinct supervisor with case assignment authority', is_system: true, permission_codes: ['cases:read', 'cases:create', 'cases:assign', 'documents:upload'], user_count: 8 },
-    { id: 'r-4', code: 'court', name: 'Judicial Bench (Magistrate / Judge)', description: 'Presiding judicial bench for bail and trial orders', is_system: true, permission_codes: ['cases:read', 'bail:order', 'judiciary:hearings_schedule', 'judiciary:unredacted_view'], user_count: 12 },
-    { id: 'r-5', code: 'prosecutor', name: 'Public Prosecutor', description: 'Prosecutor validating stage requirements', is_system: true, permission_codes: ['cases:read', 'judiciary:charge_sheet_file'], user_count: 6 },
-    { id: 'r-6', code: 'external_authority', name: 'External Authority (FSL / Bank)', description: 'Forensic labs and banks fulfilling Section 91 requisitions', is_system: true, permission_codes: ['evidence:fulfill_submit'], user_count: 24 },
-    { id: 'r-7', code: 'defense', name: 'Defense Counsel / Accused', description: 'Submission-only bail and surety petitions', is_system: true, permission_codes: ['bail:apply', 'bail:surety_submit'], user_count: 31 },
-    { id: 'r-8', code: 'config_admin', name: 'Platform Administrator', description: 'System governance, roles, and schema registry', is_system: true, permission_codes: ['admin:roles_manage', 'admin:schemas_manage', 'admin:chain_recovery'], user_count: 3 },
+    { id: 'r-1', code: 'duty_officer', name: 'Duty Officer (Station Intake)', description: 'FIR intake and initial registration', is_system: true, permission_codes: ['cases:create', 'cases:read', 'documents:upload'], user_count: 1 },
+    { id: 'r-2', code: 'io', name: 'Investigating Officer (IO)', description: 'Assigned investigator with case and evidence access', is_system: true, permission_codes: ['cases:read', 'cases:diary_write', 'documents:upload', 'evidence:request_create'], user_count: 1 },
+    { id: 'r-3', code: 'sho', name: 'Station House Officer (SHO)', description: 'Precinct supervisor with case assignment authority', is_system: true, permission_codes: ['cases:read', 'cases:create', 'cases:assign', 'documents:upload'], user_count: 1 },
+    { id: 'r-4', code: 'court', name: 'Judicial Bench (Magistrate / Judge)', description: 'Presiding judicial bench for bail and trial orders', is_system: true, permission_codes: ['cases:read', 'bail:order', 'judiciary:hearings_schedule', 'judiciary:unredacted_view'], user_count: 1 },
+    { id: 'r-5', code: 'prosecutor', name: 'Public Prosecutor', description: 'Prosecutor validating stage requirements', is_system: true, permission_codes: ['cases:read', 'judiciary:charge_sheet_file'], user_count: 1 },
+    { id: 'r-6', code: 'external_authority', name: 'External Authority (FSL / Bank)', description: 'Forensic labs and banks fulfilling Section 91 requisitions', is_system: true, permission_codes: ['evidence:fulfill_submit'], user_count: 1 },
+    { id: 'r-7', code: 'defense', name: 'Defense Counsel / Accused', description: 'Submission-only bail and surety petitions', is_system: true, permission_codes: ['bail:apply', 'bail:surety_submit'], user_count: 1 },
+    { id: 'r-8', code: 'config_admin', name: 'Platform Administrator', description: 'System governance, roles, and schema registry', is_system: true, permission_codes: ['admin:roles_manage', 'admin:schemas_manage', 'admin:chain_recovery'], user_count: 1 },
   ];
 
   const fallbackPermissions = [
@@ -68,8 +70,8 @@ export default function PlatformAdmin() {
     { id: 'p-5', code: 'documents:read', name: 'Read Documents', category: 'documents', description: 'Read role-scoped sanitized documents' },
     { id: 'p-6', code: 'documents:upload', name: 'Upload Documents', category: 'documents', description: 'Ingest evidentiary records with SHA-256' },
     { id: 'p-7', code: 'documents:correct_redaction', name: 'Correct Redaction Tag', category: 'documents', description: 'Submit officer correction tags' },
-    { id: 'p-8', code: 'evidence:request_create', name: 'Create Requisition', category: 'evidence', description: 'Dispatch Section 91 requisitions' },
-    { id: 'p-9', code: 'evidence:fulfill_submit', name: 'Fulfill Requisition', category: 'evidence', description: 'Upload certified forensic/bank records' },
+    { id: 'p-8', code: 'evidence:request_create', name: 'Create Requisition', category: 'evidence_requests', description: 'Dispatch Section 91 requisitions' },
+    { id: 'p-9', code: 'evidence:fulfill_submit', name: 'Fulfill Requisition', category: 'evidence_requests', description: 'Upload certified forensic/bank records' },
     { id: 'p-10', code: 'bail:apply', name: 'Apply for Bail', category: 'bail', description: 'Submit bail petition (Sec 437/439 CrPC)' },
     { id: 'p-11', code: 'bail:order', name: 'Issue Bail Order', category: 'bail', description: 'Pronounce bail orders and conditions' },
     { id: 'p-12', code: 'bail:surety_submit', name: 'Submit Surety Bond', category: 'bail', description: 'Register surety undertaking' },
@@ -84,36 +86,60 @@ export default function PlatformAdmin() {
   ];
 
   const fallbackUsers = [
-    { id: 'u-1', name: 'Vikram Sharma', email: 'admin.sharma@legadoc.gov.in', service_id: 'MHA-ADM-001', designation: 'Director (Systems)', role: 'config_admin', org_name: 'MHA / NIC' },
-    { id: 'u-2', name: 'Inspector S. Rao', email: 'officer.rao@police.gov.in', service_id: 'DL-POL-4921', designation: 'Inspector of Police', role: 'io', org_name: 'Delhi Police Cyber Cell' },
-    { id: 'u-3', name: 'Sub-Inspector A. Verma', email: 'duty.verma@police.gov.in', service_id: 'DL-POL-1084', designation: 'Duty Officer (Intake)', role: 'duty_officer', org_name: 'Delhi Police Central' },
-    { id: 'u-4', name: 'Hon. Justice R. S. Iyer', email: 'magistrate.iyer@court.gov.in', service_id: 'DEL-JUD-082', designation: 'Chief Judicial Magistrate', role: 'court', org_name: 'Patiala House Courts' },
-    { id: 'u-5', name: 'Dr. Pradeep Nair', email: 'fsl.director@fsl.gov.in', service_id: 'CFSL-DIR-91', designation: 'Senior Scientific Officer', role: 'external_authority', org_name: 'Central Forensic Science Lab' },
+    { id: 'u-1', name: 'Vikram Sharma', email: 'admin.sharma@legadoc.gov.in', service_id: 'MHA-ADM-001', designation: 'Director (Information Systems)', role: 'config_admin', org_name: 'Ministry of Home Affairs / NIC' },
+    { id: 'u-2', name: 'Inspector S. Rao', email: 'officer.rao@police.gov.in', service_id: 'DL-POL-4921', designation: 'Inspector of Police (Cyber Cell)', role: 'io', org_name: 'Delhi Police Cyber Cell' },
+    { id: 'u-3', name: 'Sub-Inspector A. Verma', email: 'duty.verma@police.gov.in', service_id: 'DL-POL-1084', designation: 'Duty Officer (Station Intake)', role: 'duty_officer', org_name: 'Delhi Police (Central Precinct)' },
+    { id: 'u-4', name: 'Hon. Justice R. S. Iyer', email: 'magistrate.iyer@court.gov.in', service_id: 'DEL-JUD-082', designation: 'Chief Judicial Magistrate', role: 'court', org_name: 'Patiala House District Courts' },
+    { id: 'u-5', name: 'Dr. Pradeep Nair', email: 'fsl.director@fsl.gov.in', service_id: 'CFSL-DIR-91', designation: 'Senior Scientific Officer', role: 'external_authority', org_name: 'Central Forensic Science Laboratory' },
     { id: 'u-6', name: 'Adv. K. L. Mehta', email: 'defense.advocate@bar.in', service_id: 'DHC-BAR-5920', designation: 'Advocate-on-Record', role: 'defense', org_name: 'Delhi High Court Bar' },
+  ];
+
+  const fallbackOrgs = [
+    { id: 'o-1', name: 'Ministry of Home Affairs / NIC', org_type: 'admin', user_count: 1 },
+    { id: 'o-2', name: 'Delhi Police Cyber Cell', org_type: 'police', user_count: 1 },
+    { id: 'o-3', name: 'Delhi Police (Central Precinct)', org_type: 'police', user_count: 1 },
+    { id: 'o-4', name: 'Patiala House District Courts', org_type: 'court', user_count: 1 },
+    { id: 'o-5', name: 'Central Forensic Science Laboratory', org_type: 'fsl', user_count: 1 },
   ];
 
   const loadRoleData = async () => {
     setLoadingRoles(true);
     try {
-      const [rData, pData, uData] = await Promise.all([
+      const [rData, pData, uData, oData] = await Promise.all([
         apiClient('/admin/roles').catch(() => fallbackRoles),
         apiClient('/admin/permissions').catch(() => fallbackPermissions),
         apiClient('/admin/users').catch(() => fallbackUsers),
+        apiClient('/admin/orgs').catch(() => fallbackOrgs),
       ]);
       setRoles(Array.isArray(rData) && rData.length > 0 ? rData : fallbackRoles);
       setPermissions(Array.isArray(pData) && pData.length > 0 ? pData : fallbackPermissions);
       setUsersList(Array.isArray(uData) && uData.length > 0 ? uData : fallbackUsers);
+      setOrgs(Array.isArray(oData) && oData.length > 0 ? oData : fallbackOrgs);
     } catch (_) {
       setRoles(fallbackRoles);
       setPermissions(fallbackPermissions);
       setUsersList(fallbackUsers);
+      setOrgs(fallbackOrgs);
     } finally {
       setLoadingRoles(false);
     }
   };
 
+  const loadAuditData = async () => {
+    setLoadingAudit(true);
+    try {
+      const logs = await apiClient('/admin/audit-logs?limit=50').catch(() => []);
+      setAuditLogs(Array.isArray(logs) ? logs : []);
+    } catch (_) {
+      setAuditLogs([]);
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
+
   useEffect(() => {
     loadRoleData();
+    loadAuditData();
   }, []);
 
   const handleTogglePermission = (permCode) => {
@@ -139,19 +165,9 @@ export default function PlatformAdmin() {
       const created = await apiClient('/admin/roles', { body: payload });
       setRoles([...roles, created]);
       setAlert({ type: 'success', msg: `Custom role "${payload.name}" successfully provisioned with ${selectedPermissions.length} permissions.` });
+      loadAuditData();
     } catch (err) {
-      // Local optimistic fallback
-      const mockCreated = {
-        id: `role-${Date.now()}`,
-        code: payload.code,
-        name: payload.name,
-        description: payload.description,
-        is_system: false,
-        permission_codes: selectedPermissions,
-        user_count: 0
-      };
-      setRoles([...roles, mockCreated]);
-      setAlert({ type: 'success', msg: `Role "${payload.name}" provisioned. Permission matrix bound to database.` });
+      setAlert({ type: 'error', msg: `Failed to create role: ${err.message || 'Server error'}` });
     } finally {
       setShowCreateRoleModal(false);
       setNewRoleCode('');
@@ -166,15 +182,15 @@ export default function PlatformAdmin() {
       setAlert({ type: 'warning', msg: 'System-protected roles cannot be deleted.' });
       return;
     }
-    if (!window.confirm(`Are you sure you want to delete custom role "${role.name}"?`)) return;
+    if (!window.confirm(`Are you sure you want to delete custom role "${role.name}"? This action will be permanently audited.`)) return;
 
     try {
       await apiClient(`/admin/roles/${role.id}`, { method: 'DELETE' });
       setRoles(roles.filter(r => r.id !== role.id));
-      setAlert({ type: 'success', msg: `Role "${role.name}" deleted.` });
+      setAlert({ type: 'success', msg: `Role "${role.name}" deleted. Audit record recorded.` });
+      loadAuditData();
     } catch (err) {
-      setRoles(roles.filter(r => r.id !== role.id));
-      setAlert({ type: 'success', msg: `Role "${role.name}" removed.` });
+      setAlert({ type: 'error', msg: `Failed to delete role: ${err.message || 'Server error'}` });
     }
   };
 
@@ -187,37 +203,67 @@ export default function PlatformAdmin() {
         body: { role_code: assignedRoleCode }
       });
       setUsersList(usersList.map(u => u.id === selectedUserForAssign.id ? { ...u, role: assignedRoleCode } : u));
-      setAlert({ type: 'success', msg: `Role "${assignedRoleCode}" authoritatively assigned to ${selectedUserForAssign.name}.` });
+      setAlert({ type: 'success', msg: `Role "${assignedRoleCode}" authoritatively assigned to ${selectedUserForAssign.name}. Audit trail updated.` });
+      loadAuditData();
     } catch (err) {
-      setUsersList(usersList.map(u => u.id === selectedUserForAssign.id ? { ...u, role: assignedRoleCode } : u));
-      setAlert({ type: 'success', msg: `Role assignment committed for ${selectedUserForAssign.name}.` });
+      setAlert({ type: 'error', msg: `Role assignment failed: ${err.message || 'Server error'}` });
     } finally {
       setSelectedUserForAssign(null);
       setAssignedRoleCode('');
     }
   };
 
-  const handleCreateOrg = (e) => {
-    e.preventDefault();
-    const newEntry = {
-      id: `ORG-${newOrgType}-${Date.now().toString().slice(-4)}`,
-      name: newOrgName,
-      type: newOrgType,
-      active_users: 1,
-      status: 'ACTIVE'
-    };
-    setOrgs([...orgs, newEntry]);
-    setAlert({ type: 'success', msg: `Organization "${newOrgName}" onboarded with cryptographic MSP credentials.` });
-    setNewOrgName('');
+  const handleRevokeRole = async (targetUser) => {
+    if (!window.confirm(`Revoke assigned role from ${targetUser.name}? User role will be set to 'unassigned' and this sensitive administrative action will be recorded in the tamper-evident audit trail.`)) return;
+
+    try {
+      await apiClient(`/admin/users/${targetUser.id}/remove-role`, { method: 'POST' });
+      setUsersList(usersList.map(u => u.id === targetUser.id ? { ...u, role: 'unassigned' } : u));
+      setAlert({ type: 'success', msg: `Role revoked for ${targetUser.name}. Logged to tamper-evident audit trail.` });
+      loadAuditData();
+    } catch (err) {
+      setAlert({ type: 'error', msg: `Failed to revoke role: ${err.message || 'Server error'}` });
+    }
   };
 
-  const handleExecuteChainRetry = () => {
+  const handleCreateOrg = async (e) => {
+    e.preventDefault();
+    if (!newOrgName.trim()) return;
+
+    try {
+      const created = await apiClient('/admin/orgs', {
+        body: { name: newOrgName.trim(), org_type: newOrgType }
+      });
+      setOrgs([...orgs, created]);
+      setAlert({ type: 'success', msg: `Organization "${created.name}" onboarded and persisted to database.` });
+      setNewOrgName('');
+      loadAuditData();
+    } catch (err) {
+      setAlert({ type: 'error', msg: `Failed to onboard organization: ${err.message || 'Server error'}` });
+    }
+  };
+
+  const handleExecuteChainRetry = async () => {
     setShowConfirmModal(false);
     setConfirmInput('');
-    setAlert({
-      type: 'success',
-      msg: `Retry chain write dispatched for Document ${retryDocId}. Deterministic key (${retryDocId}:v1) reused.`
-    });
+    if (!retryDocId.trim()) return;
+
+    setChainRetrying(true);
+    try {
+      const res = await apiClient(`/documents/${retryDocId.trim()}/retry-chain-write`, { method: 'POST' });
+      setAlert({
+        type: 'success',
+        msg: `Retry chain write completed for Document ${retryDocId}. Ledger Status: ${res.chain_status || 'dispatched'}.`
+      });
+      loadAuditData();
+    } catch (err) {
+      setAlert({
+        type: 'warning',
+        msg: `Chain write retry: ${err.message || 'Document identifier not found or ledger peer error'}`
+      });
+    } finally {
+      setChainRetrying(false);
+    }
   };
 
   // Group permissions by category for modal
@@ -232,7 +278,7 @@ export default function PlatformAdmin() {
       <div className="gov-breadcrumb-bar">
         <span>{t('nav_admin', 'Platform Administration')}</span>
         <span className="gov-breadcrumb-separator">›</span>
-        <span>Role Governance & Security</span>
+        <span>Governance, Roles & Audit Integrity</span>
       </div>
 
       <div className="page-container">
@@ -240,7 +286,7 @@ export default function PlatformAdmin() {
           <div>
             <h1 className="page-title">Platform Administration & Security Governance</h1>
             <p className="page-desc">
-              Dynamic RBAC role creation, permission mapping, document schemas, and two-person control ledger recovery.
+              Authoritative RBAC role governance, tenant organization management, tamper-evident audit inspection, and ledger operations.
             </p>
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -252,7 +298,7 @@ export default function PlatformAdmin() {
         <div className="domain-notice">
           <strong>Security Standard (Audit Section 1.6 & 5.0):</strong> Only authorized administrators with
           <code>admin:roles_manage</code> clearance can modify roles or assign permissions. Normal users cannot elevate
-          their own privileges. All assignment changes are committed server-side to the authoritative directory.
+          their own privileges. All assignment changes and administrative actions are logged to the immutable SHA-256 hash chain.
         </div>
 
         {alert && (
@@ -288,10 +334,13 @@ export default function PlatformAdmin() {
             Chain-Write Recovery
           </button>
           <button
-            className={`gov-tab-btn ${activeTab === 'parser_audit' ? 'active' : ''}`}
-            onClick={() => setActiveTab('parser_audit')}
+            className={`gov-tab-btn ${activeTab === 'audit_trail' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTab('audit_trail');
+              loadAuditData();
+            }}
           >
-            AI Parser Audit Log
+            Administrative & Role Audit Trail
           </button>
         </div>
 
@@ -372,48 +421,76 @@ export default function PlatformAdmin() {
               </div>
             </div>
 
-            {/* Officer Directory & Role Assignment */}
+            {/* Users Directory Table */}
             <div className="card">
-              <h2 className="card-title">Officer Directory & Role Assignment</h2>
-              <span className="table-caption">
-                Assign authoritative roles to registered officers across departments.
-              </span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                <div>
+                  <h2 className="card-title" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: 0 }}>
+                    Official Personnel Directory & Role Assignments
+                  </h2>
+                  <span className="table-caption" style={{ marginBottom: 0 }}>
+                    Officers and external authorities with authoritative government roles.
+                  </span>
+                </div>
+                <button className="btn btn-secondary" onClick={loadRoleData} disabled={loadingRoles} style={{ height: '32px', fontSize: '12px' }}>
+                  {loadingRoles ? 'Syncing...' : 'Sync Personnel'}
+                </button>
+              </div>
 
               <div className="table-container">
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Officer Name</th>
-                      <th>Service Badge ID</th>
-                      <th>Department / Organization</th>
-                      <th>Official Designation</th>
-                      <th>Current Authoritative Role</th>
-                      <th>Action</th>
+                      <th>Officer Name & Email</th>
+                      <th>Service ID / Badge</th>
+                      <th>Organization</th>
+                      <th>Designation</th>
+                      <th>Assigned Role</th>
+                      <th>Role Management</th>
                     </tr>
                   </thead>
                   <tbody>
                     {usersList.map((u) => (
                       <tr key={u.id}>
-                        <td style={{ fontWeight: 600 }}>{u.name}</td>
-                        <td><span className="mono-text">{u.service_id || 'N/A'}</span></td>
-                        <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{u.org_name || 'Government Organization'}</td>
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{u.name}</div>
+                          <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{u.email}</span>
+                        </td>
+                        <td>
+                          <span className="mono-text" style={{ fontSize: '12px', fontWeight: 600 }}>
+                            {u.service_id || '—'}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: '12px' }}>{u.org_name || 'Government Agency'}</td>
                         <td style={{ fontSize: '12px' }}>{u.designation || 'Officer'}</td>
                         <td>
-                          <span className="tag tag-success" style={{ fontFamily: 'var(--font-mono)' }}>
+                          <span className={`tag ${u.role === 'unassigned' ? 'tag-neutral' : 'tag-success'}`} style={{ fontFamily: 'var(--font-mono)' }}>
                             {u.role}
                           </span>
                         </td>
                         <td>
-                          <button
-                            className="btn btn-secondary"
-                            style={{ height: '26px', fontSize: '11px', padding: '0 8px' }}
-                            onClick={() => {
-                              setSelectedUserForAssign(u);
-                              setAssignedRoleCode(u.role);
-                            }}
-                          >
-                            Reassign Role
-                          </button>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <button
+                              className="btn btn-secondary"
+                              style={{ height: '26px', fontSize: '11px', padding: '0 8px' }}
+                              onClick={() => {
+                                setSelectedUserForAssign(u);
+                                setAssignedRoleCode(u.role);
+                              }}
+                            >
+                              Assign Role
+                            </button>
+                            {u.role !== 'unassigned' && (
+                              <button
+                                className="btn btn-secondary"
+                                style={{ height: '26px', fontSize: '11px', padding: '0 6px', color: 'var(--status-rejected-text)' }}
+                                onClick={() => handleRevokeRole(u)}
+                                title="Revoke Role Assignment"
+                              >
+                                Revoke
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -455,7 +532,7 @@ export default function PlatformAdmin() {
                     <input
                       type="text"
                       className="form-input"
-                      placeholder="e.g. narcotics_inspector"
+                      placeholder="e.g. special_investigator"
                       value={newRoleCode}
                       onChange={(e) => setNewRoleCode(e.target.value)}
                       required
@@ -466,7 +543,7 @@ export default function PlatformAdmin() {
                     <input
                       type="text"
                       className="form-input"
-                      placeholder="e.g. Narcotics Task Force Inspector"
+                      placeholder="e.g. Special Task Force Investigator"
                       value={newRoleName}
                       onChange={(e) => setNewRoleName(e.target.value)}
                       required
@@ -580,7 +657,7 @@ export default function PlatformAdmin() {
                 </div>
 
                 <div className="domain-notice" style={{ fontSize: '11px', marginTop: '12px' }}>
-                  Notice: Reassigning an officer's role updates their access token claims and permissions immediately across the government portal.
+                  Audit Notice: This role change is authoritatively verified and appended to the tamper-evident audit hash chain.
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
@@ -596,25 +673,41 @@ export default function PlatformAdmin() {
           </div>
         )}
 
-        {/* Tab 2: Document Schemas & Recognizers */}
+        {/* Tab 2: Document Schemas & Recognizers (Explicit Architectural Reference) */}
         {activeTab === 'schemas' && (
           <div className="card">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+              <span className="tag tag-neutral" style={{ fontWeight: 600 }}>
+                Status: 501 Not Implemented (Dynamic Registry)
+              </span>
+              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                Protected Static Redaction Baseline
+              </span>
+            </div>
+
+            <div className="domain-notice" style={{ marginBottom: '20px' }}>
+              <strong>Architecture Policy:</strong> In this release, document sensitivity tiers and entity recognizers
+              are enforced via static, verifiable pipeline policies in <code>app/redaction.py</code>.
+              Dynamic runtime modification endpoints (<code>/admin/document-schemas</code>, <code>/admin/document-schemas/:type/recognizers</code>, <code>/admin/stage-requirements</code>)
+              explicitly return <strong>HTTP 501 Not Implemented</strong> to prevent unverified runtime tampering with redaction rules.
+            </div>
+
             <span className="table-caption">
-              Registered document schemas and associated entity recognizers.
+              Static Redaction Policy Reference (Enforced in app/redaction.py)
             </span>
             <div className="table-container">
               <table className="data-table">
                 <thead>
                   <tr>
                     <th>Document Type</th>
-                    <th>Sensitivity Tier</th>
-                    <th>Protected Field Categories</th>
+                    <th>Sensitivity Classification</th>
+                    <th>Protected Entity Fields</th>
                     <th>AI Recognizer Model</th>
-                    <th>Status</th>
+                    <th>Enforcement Mode</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {schemas.map((s) => (
+                  {staticSchemaReference.map((s) => (
                     <tr key={s.doc_type}>
                       <td><strong style={{ color: 'var(--text-primary)' }}>{s.doc_type}</strong></td>
                       <td>
@@ -628,7 +721,7 @@ export default function PlatformAdmin() {
                         </div>
                       </td>
                       <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{s.recognizers}</td>
-                      <td><span className="tag tag-success">Active</span></td>
+                      <td><span className="tag tag-neutral">Static Policy (Code Enforced)</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -637,19 +730,19 @@ export default function PlatformAdmin() {
           </div>
         )}
 
-        {/* Tab 3: Organization Onboarding */}
+        {/* Tab 3: Organization Onboarding (Real Database Integration) */}
         {activeTab === 'orgs' && (
           <div className="grid-2">
             <div className="card">
               <span className="table-caption">
-                {orgs.length} registered tenant organizations.
+                {orgs.length} registered tenant organizations in database.
               </span>
               <div className="table-container">
                 <table className="data-table">
                   <thead>
                     <tr>
                       <th>Organization Name</th>
-                      <th>Type</th>
+                      <th>Classification</th>
                       <th>Active Officers</th>
                       <th>Status</th>
                     </tr>
@@ -661,9 +754,9 @@ export default function PlatformAdmin() {
                           <div style={{ fontWeight: 500 }}>{o.name}</div>
                           <span className="mono-text" style={{ fontSize: '11px' }}>{o.id}</span>
                         </td>
-                        <td><span className="tag tag-neutral">{o.type}</span></td>
-                        <td>{o.active_users}</td>
-                        <td><span className="tag tag-success">{o.status}</span></td>
+                        <td><span className="tag tag-neutral">{o.org_type?.toUpperCase()}</span></td>
+                        <td>{o.user_count || 0}</td>
+                        <td><span className="tag tag-success">Active</span></td>
                       </tr>
                     ))}
                   </tbody>
@@ -674,7 +767,7 @@ export default function PlatformAdmin() {
             <div className="card">
               <h2 className="card-title">Onboard New Organization</h2>
               <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '16px' }}>
-                Provisions cryptographic MSP identity and RBAC partition on the Fabric network.
+                Persist new tenant authority or agency to the system database with cryptographic tenancy.
               </p>
 
               <form onSubmit={handleCreateOrg}>
@@ -683,7 +776,7 @@ export default function PlatformAdmin() {
                   <input
                     type="text"
                     className="form-input"
-                    placeholder="e.g. State Cyber Investigation Agency"
+                    placeholder="e.g. State Cyber Forensic Laboratory"
                     value={newOrgName}
                     onChange={(e) => setNewOrgName(e.target.value)}
                     required
@@ -697,16 +790,17 @@ export default function PlatformAdmin() {
                     value={newOrgType}
                     onChange={(e) => setNewOrgType(e.target.value)}
                   >
-                    <option value="POLICE">POLICE (Investigative Precinct)</option>
-                    <option value="JUDICIARY">JUDICIARY (Magistrate / Sessions Court)</option>
-                    <option value="FORENSIC_LAB">FORENSIC_LAB (FSL / Chemical / Cyber)</option>
-                    <option value="FINANCIAL">FINANCIAL (Bank / NBFC Unit)</option>
-                    <option value="TELECOM">TELECOM (Telecom Service Provider)</option>
+                    <option value="police">Police (Precinct / Crime Branch)</option>
+                    <option value="court">Judiciary (Court Bench / Sessions)</option>
+                    <option value="fsl">Forensic Science Laboratory (FSL)</option>
+                    <option value="bank">Financial / Banking Nodal Unit</option>
+                    <option value="telecom">Telecom Service Provider</option>
+                    <option value="admin">Administrative Agency</option>
                   </select>
                 </div>
 
                 <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>
-                  Provision Organization
+                  Onboard Organization to Database
                 </button>
               </form>
             </div>
@@ -718,15 +812,16 @@ export default function PlatformAdmin() {
           <div className="card" style={{ maxWidth: '600px', margin: '0 auto' }}>
             <h2 className="card-title">Manual Blockchain Retry Recovery</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '16px' }}>
-              In the event of a peer disconnect, this dispatches a retry for the document's SHA-256 hash.
+              In the event of a peer disconnect or network timeout, this dispatches a retry for the document's SHA-256 hash.
               The original deterministic idempotency key is reused to guarantee zero duplicate ledger entries.
             </p>
 
             <div className="form-group">
-              <label className="form-label">Target Document Identifier</label>
+              <label className="form-label">Target Document UUID</label>
               <input
                 type="text"
-                className="form-input"
+                className="form-input mono-text"
+                placeholder="e.g. 550e8400-e29b-41d4-a716-446655440000"
                 value={retryDocId}
                 onChange={(e) => setRetryDocId(e.target.value)}
               />
@@ -741,9 +836,10 @@ export default function PlatformAdmin() {
               type="button"
               className="btn btn-primary"
               style={{ width: '100%' }}
+              disabled={!retryDocId.trim() || chainRetrying}
               onClick={() => setShowConfirmModal(true)}
             >
-              Initiate Chain Retry
+              {chainRetrying ? 'Dispatching...' : 'Initiate Chain Retry'}
             </button>
           </div>
         )}
@@ -791,49 +887,131 @@ export default function PlatformAdmin() {
           </div>
         )}
 
-        {/* Tab 5: AI Parser Audit */}
-        {activeTab === 'parser_audit' && (
+        {/* Tab 5: Administrative & Role Audit Trail (Real SHA-256 Hash Chain) */}
+        {activeTab === 'audit_trail' && (
           <div className="card">
-            <span className="table-caption">
-              Entity-level AI Parser auto-tag and officer override decisions (Security Auditor inspection view).
-            </span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <div>
+                <h2 className="card-title" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: 0 }}>
+                  Tamper-Evident Administrative & Role Audit Trail
+                </h2>
+                <span className="table-caption" style={{ marginBottom: 0 }}>
+                  Cryptographically chained SHA-256 audit records for administrative, role, and security events.
+                </span>
+              </div>
+              <button className="btn btn-secondary" onClick={loadAuditData} disabled={loadingAudit} style={{ height: '32px', fontSize: '12px' }}>
+                {loadingAudit ? 'Refreshing...' : 'Refresh Audit Log'}
+              </button>
+            </div>
+
+            <div className="domain-notice" style={{ marginBottom: '16px' }}>
+              <strong>Hash-Chain Verification:</strong> Every administrative action computes
+              <code>row_hash = SHA256(prev_row_hash + row_content)</code>, guaranteeing that reordering, deleting,
+              or modifying records is immediately detectable.
+            </div>
+
             <div className="table-container">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Case Docket</th>
-                    <th>Target Document</th>
-                    <th>Entity Type</th>
-                    <th>Span Coordinates</th>
-                    <th>Decision Source</th>
-                    <th>Confidence Score</th>
+                    <th>Timestamp</th>
+                    <th>Administrator</th>
+                    <th>Action</th>
+                    <th>Target Type</th>
+                    <th>Context / Changes</th>
+                    <th>SHA-256 Row Hash</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>CYB-2026-482910</td>
-                    <td>Doc-Complaint-v1</td>
-                    <td><span className="tag tag-neutral">PERSON</span></td>
-                    <td><span className="mono-text">[42:61]</span></td>
-                    <td>PaddleOCR + Spacy NER</td>
-                    <td><strong>94.2%</strong></td>
-                  </tr>
-                  <tr>
-                    <td>CYB-2026-482910</td>
-                    <td>Doc-Complaint-v1</td>
-                    <td><span className="tag tag-neutral">PHONE_NUMBER</span></td>
-                    <td><span className="mono-text">[120:132]</span></td>
-                    <td>Regex Recognizer</td>
-                    <td><strong>99.8%</strong></td>
-                  </tr>
-                  <tr>
-                    <td>NDP-2026-119482</td>
-                    <td>Doc-Seizure-v1</td>
-                    <td><span className="tag tag-danger">AADHAAR_ID</span></td>
-                    <td><span className="mono-text">[215:229]</span></td>
-                    <td>Officer Correction (IO Rao)</td>
-                    <td><span className="tag tag-success">Verified</span></td>
-                  </tr>
+                  {auditLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-secondary)' }}>
+                        {loadingAudit ? 'Loading audit records...' : 'No administrative audit events recorded yet. Assign a role or onboard an organization to generate an audit entry.'}
+                      </td>
+                    </tr>
+                  ) : (
+                    auditLogs.map((log) => (
+                      <tr key={log.id}>
+                        <td style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
+                          {new Date(log.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+                        </td>
+                        <td>
+                          <div style={{ fontWeight: 500 }}>{log.actor_name || 'Administrator'}</div>
+                          <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>{log.actor_email || 'System'}</span>
+                        </td>
+                        <td>
+                          <span className={`tag ${
+                            log.action === 'role_assigned' ? 'tag-success' :
+                            log.action === 'role_removed' ? 'tag-danger' :
+                            log.action === 'role_created' ? 'tag-neutral' :
+                            log.action === 'role_deleted' ? 'tag-danger' : 'tag-neutral'
+                          }`}>
+                            {log.action}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="tag tag-neutral">{log.target_type || 'system'}</span>
+                        </td>
+                        <td style={{ fontSize: '12px' }}>
+                          {log.action === 'role_assigned' && (
+                            <div>
+                              <span><strong>{log.action_metadata?.target_user_name}</strong>: </span>
+                              <span className="mono-text" style={{ textDecoration: 'line-through', color: 'var(--text-tertiary)' }}>
+                                {log.action_metadata?.previous_role}
+                              </span>
+                              <span> → </span>
+                              <span className="mono-text" style={{ fontWeight: 600, color: 'var(--status-active-text)' }}>
+                                {log.action_metadata?.new_role}
+                              </span>
+                            </div>
+                          )}
+                          {log.action === 'role_removed' && (
+                            <div>
+                              <span><strong>{log.action_metadata?.target_user_name}</strong>: </span>
+                              <span className="mono-text" style={{ textDecoration: 'line-through' }}>
+                                {log.action_metadata?.previous_role}
+                              </span>
+                              <span> → revoked</span>
+                            </div>
+                          )}
+                          {log.action === 'role_created' && (
+                            <div>
+                              <span>Created role: <strong>{log.action_metadata?.role_name}</strong> (<code>{log.action_metadata?.role_code}</code>)</span>
+                            </div>
+                          )}
+                          {log.action === 'role_deleted' && (
+                            <div>
+                              <span>Deleted role: <code>{log.action_metadata?.role_code}</code></span>
+                            </div>
+                          )}
+                          {log.action === 'role_updated' && (
+                            <div>
+                              <span>Updated role: <code>{log.action_metadata?.role_code}</code></span>
+                            </div>
+                          )}
+                          {log.action === 'organization_onboarded' && (
+                            <div>
+                              <span>Onboarded org: <strong>{log.action_metadata?.org_name}</strong> ({log.action_metadata?.org_type})</span>
+                            </div>
+                          )}
+                          {!['role_assigned', 'role_removed', 'role_created', 'role_deleted', 'role_updated', 'organization_onboarded'].includes(log.action) && (
+                            <span className="mono-text" style={{ fontSize: '11px' }}>
+                              {JSON.stringify(log.action_metadata || {})}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span
+                            className="mono-text"
+                            style={{ fontSize: '11px', color: 'var(--text-secondary)' }}
+                            title={`Full Row Hash: ${log.row_hash}\nPrev Hash: ${log.prev_hash || 'None (Genesis)'}`}
+                          >
+                            {log.row_hash ? `${log.row_hash.slice(0, 10)}...${log.row_hash.slice(-6)}` : '—'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>

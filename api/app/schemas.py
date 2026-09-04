@@ -164,3 +164,38 @@ class UserSummaryResponse(BaseModel):
     org_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Organization Management ----------
+class OrganizationResponse(BaseModel):
+    id: UUID
+    name: str
+    org_type: str
+    created_at: datetime
+    user_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrganizationCreateRequest(BaseModel):
+    name: str
+    org_type: str
+
+
+# ---------- Administrative Audit Log ----------
+class AdminAuditLogEntry(BaseModel):
+    id: UUID
+    case_id: Optional[UUID] = None
+    actor_user_id: Optional[UUID] = None
+    actor_name: Optional[str] = None
+    actor_email: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[UUID] = None
+    action_metadata: Optional[dict] = None
+    prev_hash: Optional[str] = None
+    row_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+

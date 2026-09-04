@@ -1,24 +1,21 @@
 """Admin & config — schema registry, AI Parser recognizer mapping, stage
-requirements, org onboarding. See SYSTEM_DESIGN.md Domain 8 (Platform / Admin).
+requirements, org onboarding, role & permission governance, and tamper-evident audit logs.
+See SYSTEM_DESIGN.md Domain 8 (Platform / Admin).
 
 Config Admin vs. Security Auditor (see models.py, User.role): a single
 super-admin holding both schema-editing power and audit-inspection power is
 one compromised account away from total control. Config Admin owns
 everything in this file. Security Auditor owns audit.py's ai-parser endpoint
 instead — never both from the same role.
-
-Schema and recognizer-mapping changes (and Chain Worker manual recovery in
-documents.py) are exactly the actions SYSTEM_DESIGN.md flags as needing
-second-person confirmation before they take effect in a real deployment —
-not enforced in this baseline, but don't build single-click execution here
-and call it done.
 """
 
+from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.audit import write_audit_log
 from app.database import get_db
 from app.security import require_role
 
@@ -91,6 +88,20 @@ def create_role(
     db.commit()
     db.refresh(new_role)
 
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="role_created",
+        actor_user_id=actor_id,
+        target_type="role",
+        target_id=new_role.id,
+        metadata={
+            "role_code": new_role.code,
+            "role_name": new_role.name,
+            "permissions": [p.code for p in new_role.permissions]
+        }
+    )
+
     return schemas.RoleResponse(
         id=new_role.id,
         code=new_role.code,
@@ -114,6 +125,9 @@ def update_role(
     if not role:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
 
+    prev_perms = [p.code for p in role.permissions]
+    prev_name = role.name
+
     if body.name is not None:
         role.name = body.name.strip()
     if body.description is not None:
@@ -125,6 +139,22 @@ def update_role(
 
     db.commit()
     db.refresh(role)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="role_updated",
+        actor_user_id=actor_id,
+        target_type="role",
+        target_id=role.id,
+        metadata={
+            "role_code": role.code,
+            "previous_permissions": prev_perms,
+            "new_permissions": [p.code for p in role.permissions],
+            "name_updated": body.name is not None and body.name.strip() != prev_name,
+            "description_updated": body.description is not None
+        }
+    )
 
     user_count = db.query(models.User).filter((models.User.role_id == role.id) | (models.User.role == role.code)).count()
     return schemas.RoleResponse(
@@ -151,9 +181,25 @@ def delete_role(
     if role.is_system:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="System protected roles cannot be deleted.")
 
+    role_code = role.code
+    role_name = role.name
     db.delete(role)
     db.commit()
-    return {"status": "deleted", "role_code": role.code}
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="role_deleted",
+        actor_user_id=actor_id,
+        target_type="role",
+        target_id=role_id,
+        metadata={
+            "role_code": role_code,
+            "role_name": role_name
+        }
+    )
+
+    return {"status": "deleted", "role_code": role_code}
 
 
 @router.get("/users", response_model=list[schemas.UserSummaryResponse])
@@ -187,7 +233,7 @@ def assign_user_role(
     db: Session = Depends(get_db)
 ):
     """POST /admin/users/{user_id}/assign-role — Config Admin.
-    Authoritatively assign a role to a user. Server-side verified to prevent privilege escalation.
+    Authoritatively assign a role to a user. Writes a tamper-evident audit log entry.
     """
     user = db.get(models.User, user_id)
     if not user:
@@ -197,43 +243,234 @@ def assign_user_role(
     if not target_role:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Role '{body.role_code}' does not exist.")
 
+    previous_role = user.role
+    previous_role_id = str(user.role_id) if user.role_id else None
+
     user.role = target_role.code
     user.role_id = target_role.id
     db.commit()
+    db.refresh(user)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="role_assigned",
+        actor_user_id=actor_id,
+        target_type="user",
+        target_id=user.id,
+        metadata={
+            "target_user_id": str(user.id),
+            "target_user_name": user.name,
+            "target_user_email": user.email,
+            "previous_role": previous_role,
+            "previous_role_id": previous_role_id,
+            "new_role": target_role.code,
+            "new_role_id": str(target_role.id),
+            "role_name": target_role.name
+        }
+    )
 
     return {
         "status": "success",
         "user_id": str(user.id),
         "user_name": user.name,
+        "previous_role": previous_role,
         "assigned_role": target_role.code,
         "role_name": target_role.name
     }
 
 
-# ---------- Existing Schema & Requirements Endpoints ----------
+@router.post("/users/{user_id}/remove-role")
+def remove_user_role(
+    user_id: UUID,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """POST /admin/users/{user_id}/remove-role — Config Admin.
+    Revoke an assigned role from a user. Writes a tamper-evident audit log entry.
+    """
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    previous_role = user.role
+    user.role = "unassigned"
+    user.role_id = None
+    db.commit()
+    db.refresh(user)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="role_removed",
+        actor_user_id=actor_id,
+        target_type="user",
+        target_id=user.id,
+        metadata={
+            "target_user_id": str(user.id),
+            "target_user_name": user.name,
+            "target_user_email": user.email,
+            "previous_role": previous_role,
+            "new_role": "unassigned"
+        }
+    )
+
+    return {
+        "status": "success",
+        "user_id": str(user.id),
+        "user_name": user.name,
+        "previous_role": previous_role,
+        "current_role": "unassigned"
+    }
+
+
+# ---------- Real Organization Onboarding & Management ----------
+
+@router.get("/orgs", response_model=list[schemas.OrganizationResponse])
+def list_organizations(
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """GET /admin/orgs — Config Admin. List all registered tenant organizations with member counts."""
+    orgs = db.query(models.Organization).order_by(models.Organization.name).all()
+    results = []
+    for o in orgs:
+        count = db.query(models.User).filter(models.User.org_id == o.id).count()
+        results.append(
+            schemas.OrganizationResponse(
+                id=o.id,
+                name=o.name,
+                org_type=o.org_type,
+                created_at=o.created_at,
+                user_count=count
+            )
+        )
+    return results
+
+
+@router.post("/orgs", response_model=schemas.OrganizationResponse, status_code=status.HTTP_201_CREATED)
+def onboard_organization(
+    body: schemas.OrganizationCreateRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """POST /admin/orgs — Config Admin. Onboard external authority / stakeholder organization."""
+    name_clean = body.name.strip()
+    if not name_clean:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Organization name cannot be empty.")
+
+    existing = db.query(models.Organization).filter(models.Organization.name == name_clean).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Organization '{name_clean}' already exists.")
+
+    new_org = models.Organization(
+        name=name_clean,
+        org_type=body.org_type.strip().lower()
+    )
+    db.add(new_org)
+    db.commit()
+    db.refresh(new_org)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="organization_onboarded",
+        actor_user_id=actor_id,
+        target_type="organization",
+        target_id=new_org.id,
+        metadata={
+            "org_name": new_org.name,
+            "org_type": new_org.org_type
+        }
+    )
+
+    return schemas.OrganizationResponse(
+        id=new_org.id,
+        name=new_org.name,
+        org_type=new_org.org_type,
+        created_at=new_org.created_at,
+        user_count=0
+    )
+
+
+# ---------- Administrative & Role Audit Trail ----------
+
+@router.get("/audit-logs", response_model=list[schemas.AdminAuditLogEntry])
+def list_admin_audit_logs(
+    limit: int = 50,
+    offset: int = 0,
+    action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    claims: dict = Depends(require_role("config_admin", "security_auditor")),
+    db: Session = Depends(get_db)
+):
+    """GET /admin/audit-logs — Config Admin / Security Auditor.
+    Retrieve immutable, hash-chained system and role audit logs.
+    """
+    query = db.query(models.AuditLog)
+    if action:
+        query = query.filter(models.AuditLog.action == action)
+    if target_type:
+        query = query.filter(models.AuditLog.target_type == target_type)
+
+    rows = query.order_by(models.AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    # Pre-fetch user map for actor names
+    actor_ids = {r.actor_user_id for r in rows if r.actor_user_id is not None}
+    users = {u.id: u for u in db.query(models.User).filter(models.User.id.in_(actor_ids)).all()} if actor_ids else {}
+
+    results = []
+    for r in rows:
+        actor = users.get(r.actor_user_id)
+        results.append(
+            schemas.AdminAuditLogEntry(
+                id=r.id,
+                case_id=r.case_id,
+                actor_user_id=r.actor_user_id,
+                actor_name=actor.name if actor else None,
+                actor_email=actor.email if actor else None,
+                action=r.action,
+                target_type=r.target_type,
+                target_id=r.target_id,
+                action_metadata=r.action_metadata,
+                prev_hash=r.prev_hash,
+                row_hash=r.row_hash,
+                created_at=r.created_at
+            )
+        )
+    return results
+
+
+# ---------- Schema & Requirements Endpoints (Explicit 501 Not Implemented) ----------
 
 @router.get("/document-schemas")
 def list_document_schemas(claims: dict = Depends(require_role("config_admin"))):
-    """GET /admin/document-schemas — Config Admin."""
-    return [
-        {"doc_type": "FIR", "tier": 1, "fields": ["informant_name", "victim_address", "phone_number"], "recognizers": "Spacy + Presidio NER"},
-        {"doc_type": "Panchnama", "tier": 1, "fields": ["panch_witness_identities", "confidential_location"], "recognizers": "Presidio Custom NER"},
-        {"doc_type": "Forensic_Report", "tier": 2, "fields": ["chemical_composition", "dna_profile"], "recognizers": "FSL Format Validator"},
-        {"doc_type": "Bank_Statement", "tier": 1, "fields": ["account_number", "pan_card", "aadhaar_id"], "recognizers": "India Financial Regex"},
-    ]
+    """GET /admin/document-schemas — Config Admin.
+    Explicit 501: Dynamic document schema configuration is not implemented in this build.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Dynamic document schema configuration is not implemented in this build. Sensitivity tiers and recognizers are governed by static pipeline policies in app/redaction.py."
+    )
 
 
 @router.post("/document-schemas/{doc_type}/recognizers")
 def set_recognizer_mapping(doc_type: str, claims: dict = Depends(require_role("config_admin"))):
-    """POST /admin/document-schemas/:type/recognizers — Config Admin."""
-    return {"status": "configured", "doc_type": doc_type}
+    """POST /admin/document-schemas/:type/recognizers — Config Admin.
+    Explicit 501: Dynamic entity recognizer mapping is not implemented in this build.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Dynamic entity recognizer mapping is not implemented in this build. Entity mappings are currently static."
+    )
 
 
 @router.get("/stage-requirements")
 def list_stage_requirements(claims: dict = Depends(require_role("config_admin"))):
-    """GET /admin/stage-requirements — Config Admin."""
-    return [
-        {"crime_type": "NDPS", "requirements": ["FIR", "Panchnama", "Forensic_Report", "Witness_Statement", "Arrest_Memo"]},
-        {"crime_type": "Cybercrime", "requirements": ["FIR", "Panchnama", "Bank_Statement", "Witness_Statement"]},
-        {"crime_type": "Homicide", "requirements": ["FIR", "Inquest_Report", "Post_Mortem_Report", "Forensic_Report", "Seizure_Memo"]}
-    ]
+    """GET /admin/stage-requirements — Config Admin.
+    Explicit 501: Dynamic stage requirements configuration is not implemented in this build.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Dynamic stage requirements configuration is not implemented in this build. Case stage progression rules are currently static."
+    )

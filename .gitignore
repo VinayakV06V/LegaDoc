@@ -41,3 +41,7 @@ Thumbs.db
 # Gradle / Android (in case a nested tool ever touches this repo)
 .gradle/
 *.gradle.lockfile
+
+# Generated PDFs & local docs
+*.pdf
+

@@ -1,30 +1,15 @@
-from cryptography.fernet import Fernet
 import os
+from cryptography.fernet import Fernet
 
-KEY_PATH = os.path.join("retention", "secret.key")
+key = os.getenv("FERNET_KEY")
 
-def generate_key():
-    if not os.path.exists(KEY_PATH):
-        key = Fernet.generate_key()
-        with open(KEY_PATH, "wb") as f:
-            f.write(key)
+if not key:
+    raise ValueError("FERNET_KEY not found in environment variables")
 
-def load_key():
-    with open(KEY_PATH, "rb") as f:
-        return f.read()
+cipher = Fernet(key.encode())
 
 def encrypt_text(text):
-    if text is None:
-        return None
-
-    cipher = Fernet(load_key())
     return cipher.encrypt(text.encode()).decode()
 
 def decrypt_text(text):
-    if text is None:
-        return None
-
-    cipher = Fernet(load_key())
-    return cipher.decrypt(text.encode()).decode()
-
-generate_key()
+  return cipher.decrypt(text.encode()).decode()

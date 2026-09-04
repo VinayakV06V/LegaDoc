@@ -15,12 +15,6 @@ import tempfile
 from typing import NamedTuple, Set
 from fastapi import HTTPException, UploadFile, status
 
-try:
-    import magic
-    HAS_MAGIC = True
-except (ImportError, Exception):
-    HAS_MAGIC = False
-
 # Allowed text-bearing MIME types (routed to OCR)
 TEXT_BEARING_MIME_TYPES: Set[str] = {
     "application/pdf",
@@ -37,7 +31,6 @@ BINARY_EVIDENCE_MIME_TYPES: Set[str] = {
     "video/mpeg",
     "audio/mpeg",
     "audio/wav",
-    "application/octet-stream",
 }
 
 ALL_ALLOWED_MIME_TYPES = TEXT_BEARING_MIME_TYPES | BINARY_EVIDENCE_MIME_TYPES
@@ -62,28 +55,67 @@ def sanitize_filename(filename: str) -> str:
 
 
 def detect_mime_from_bytes(header_bytes: bytes, fallback_content_type: str = "") -> str:
-    """Detects MIME type from raw magic bytes."""
-    if HAS_MAGIC and header_bytes:
-        try:
-            detected = magic.from_buffer(header_bytes, mime=True)
-            if detected:
-                return detected.lower()
-        except Exception:
-            pass
+    """
+    Pure-Python magic-byte sniffer.
+    Zero C-library dependencies — guaranteed non-blocking across Windows, macOS, Linux, and Docker.
+    Accurately detects authentic file formats and aggressively catches disguised executables/scripts.
+    """
+    if not header_bytes:
+        return "application/octet-stream"
 
-    # Simple magic-byte fallbacks if libmagic is not available
+    # 1. Explicitly detect dangerous executable / script signatures first
+    if header_bytes.startswith(b"MZ"):
+        return "application/x-dosexec"  # Windows PE executable / DLL
+    if header_bytes.startswith(b"\x7fELF"):
+        return "application/x-executable"  # Linux ELF binary
+    if header_bytes.startswith((b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")):
+        return "application/x-mach-binary"  # macOS Mach-O binary
+    if header_bytes.startswith(b"#!"):
+        return "text/x-shellscript"  # Shell / Bash / Python script
+
+    # 2. Match authentic file format magic signatures
     if header_bytes.startswith(b"%PDF"):
         return "application/pdf"
-    elif header_bytes.startswith(b"\xff\xd8\xff"):
+    if header_bytes.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
-    elif header_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+    if header_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
-    elif header_bytes.startswith(b"II*\x00") or header_bytes.startswith(b"MM\x00*"):
+    if header_bytes.startswith(b"II*\x00") or header_bytes.startswith(b"MM\x00*"):
         return "image/tiff"
-    elif header_bytes[4:8] == b"ftyp":
+    if len(header_bytes) >= 8 and header_bytes[4:8] == b"ftyp":
         return "video/mp4"
+    if header_bytes.startswith(b"\x00\x00\x01\xba") or header_bytes.startswith(b"\x00\x00\x01\xb3"):
+        return "video/mpeg"
+    if len(header_bytes) >= 12 and header_bytes.startswith(b"RIFF") and header_bytes[8:12] == b"WAVE":
+        return "audio/wav"
+    if header_bytes.startswith(b"ID3") or (len(header_bytes) >= 2 and header_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")):
+        return "audio/mpeg"
 
-    return fallback_content_type.lower() if fallback_content_type else "application/octet-stream"
+    # 3. Text and CSV validation
+    norm_content_type = fallback_content_type.strip().lower()
+    if norm_content_type in ("text/plain", "text/csv"):
+        # Text cannot contain null bytes
+        if b"\x00" in header_bytes:
+            return "application/octet-stream"
+        try:
+            header_bytes[:1024].decode("utf-8")
+            return norm_content_type
+        except UnicodeDecodeError:
+            try:
+                header_bytes[:1024].decode("latin-1")
+                return norm_content_type
+            except Exception:
+                return "application/octet-stream"
+
+    # 4. Binary evidence formats (video/audio) without distinct single-byte magic
+    if norm_content_type in BINARY_EVIDENCE_MIME_TYPES:
+        return norm_content_type
+
+    # 5. If claimed to be PDF or image but failed magic signature, do NOT trust extension
+    if norm_content_type in ("application/pdf", "image/jpeg", "image/png", "image/tiff"):
+        return "application/octet-stream"
+
+    return norm_content_type if norm_content_type else "application/octet-stream"
 
 
 async def validate_upload_stream(

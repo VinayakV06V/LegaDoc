@@ -127,3 +127,43 @@ def test_config_admin_sees_every_case_regardless_of_assignment(client, make_user
     resp = client.get(f"/cases/{case['id']}", headers=auth_headers(admin_token))
 
     assert resp.status_code == 200
+
+
+def test_police_specialist_cannot_read_unassigned_case(client, make_user):
+    """Police specialist roles (women_cell, cyber_cell, traffic_police, etc.)
+    cannot view a case without an active CaseAssignment record (closes RBAC security hole)."""
+    duty = make_user("duty_officer", email="duty@example.com", password="pw")
+    make_user("sho", email="sho@example.com", password="pw", org=duty.organization)
+    specialist = make_user("women_cell", email="wc@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    specialist_token = login(client, "wc@example.com", "pw").json()["access_token"]
+    resp = client.get(f"/cases/{case['id']}", headers=auth_headers(specialist_token))
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Not assigned to this case"
+
+
+def test_police_specialist_can_read_assigned_case(client, make_user):
+    """Police specialist assigned to a case via CaseAssignment can read case details."""
+    duty = make_user("duty_officer", email="duty@example.com", password="pw")
+    sho = make_user("sho", email="sho@example.com", password="pw", org=duty.organization)
+    cyber_officer = make_user("cyber_cell", email="cyber@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho_token = login(client, "sho@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(cyber_officer.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    cyber_token = login(client, "cyber@example.com", "pw").json()["access_token"]
+    resp = client.get(f"/cases/{case['id']}", headers=auth_headers(cyber_token))
+
+    assert resp.status_code == 200
+    assert resp.json()["id"] == case["id"]

@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://postgres:postgres@db:5432/legadoc"
 
-    # Object storage (MinIO / S3-compatible)
-    OBJECT_STORAGE_BACKEND: str = "minio"
+    # Object storage (MinIO / S3-compatible, or disk-backed local for bare-metal dev)
+    OBJECT_STORAGE_BACKEND: str = "local"
     OBJECT_STORAGE_ENDPOINT: str = "http://minio:9000"
     OBJECT_STORAGE_ACCESS_KEY: str = "minioadmin"
     OBJECT_STORAGE_SECRET_KEY: str = "minioadmin"

@@ -164,9 +164,7 @@ def assert_case_access(case_id, claims: dict, db: Session) -> None:
     role = claims.get("role")
     if role in _UNRESTRICTED_CASE_ROLES:
         return
-    if role in _POLICE_SPECIALIST_ROLES:
-        return
-    if role == "io":
+    if role in (_POLICE_SPECIALIST_ROLES | {"io"}):
         user_id = UUID(claims["sub"])
         try:
             case_uuid = case_id if isinstance(case_id, UUID) else UUID(str(case_id))
@@ -200,7 +198,9 @@ def verify_evidence_request_org_access(
     db: Session,
 ) -> models.EvidenceRequest:
     """Validates that external authorities (FSL, Hospital, Bank, etc.) only touch
-    evidence requests specifically routed to their organization (Domain 2-4 scoping)."""
+    evidence requests specifically routed to their organization (Domain 2-4 scoping).
+    Ready for wiring into api/app/routers/evidence_requests.py as endpoints are
+    implemented from their current 501 stubs."""
     try:
         req_uuid = request_id if isinstance(request_id, UUID) else UUID(str(request_id))
     except ValueError:

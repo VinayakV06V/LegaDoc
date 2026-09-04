@@ -150,22 +150,26 @@ _default_storage = None
 
 
 def get_storage() -> ObjectStorage:
-    """FastAPI dependency. Uses MinIO if configured and not running in local test mode;
-    otherwise falls back to LocalObjectStorage (used by pytest suites)."""
+    """FastAPI dependency. Uses MinIO if configured and reachable;
+    otherwise falls back to LocalObjectStorage (used for bare-metal dev and pytest)."""
     global _default_storage
     if _default_storage is None:
         from app.config import settings
 
-        if getattr(settings, "OBJECT_STORAGE_BACKEND", "local") == "minio" and settings.ENV != "test":
+        backend = getattr(settings, "OBJECT_STORAGE_BACKEND", "local").lower()
+        if backend == "minio" and settings.ENV != "test":
             try:
-                _default_storage = MinIOObjectStorage(
+                storage = MinIOObjectStorage(
                     endpoint_url=settings.OBJECT_STORAGE_ENDPOINT,
                     access_key=settings.OBJECT_STORAGE_ACCESS_KEY,
                     secret_key=settings.OBJECT_STORAGE_SECRET_KEY,
                     bucket=settings.OBJECT_STORAGE_BUCKET,
                     env=settings.ENV,
                 )
+                storage._ensure_bucket()
+                _default_storage = storage
             except Exception:
+                # Endpoint unreachable (e.g. running natively outside docker-compose)
                 root = os.environ.get("OBJECT_STORAGE_LOCAL_DIR", "./data/objects")
                 _default_storage = LocalObjectStorage(root)
         else:

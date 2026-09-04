@@ -312,11 +312,11 @@ def test_redact_tag_adds_a_correction_and_extends_the_audit_hash_chain(client, m
 
 
 def test_upload_disguised_executable_rejected_by_magic_bytes(client, make_user, db_session):
-    """MIME sniffing check: sending binary executable bytes with a .pdf extension
-    is rejected with 415 Unsupported Media Type."""
+    """MIME sniffing check: sending binary executable bytes or shell scripts with a .pdf extension
+    is rejected with 415 Unsupported Media Type by the pure-Python sniffer."""
     case, io, io_token = _setup_case_with_io(client, make_user, db_session)
 
-    # Shell script disguised as PDF
+    # 1. Shell script disguised as PDF
     fake_pdf = b"#!/bin/bash\nrm -rf /"
     resp = client.post(
         "/documents",
@@ -324,10 +324,30 @@ def test_upload_disguised_executable_rejected_by_magic_bytes(client, make_user, 
         files={"file": ("malicious.pdf", fake_pdf, "application/pdf")},
         headers=auth_headers(io_token),
     )
-
-    # python-magic detects this is text/x-shellscript, not application/pdf
     assert resp.status_code == 415, resp.text
     assert "Unsupported file type" in resp.json()["detail"]
+
+    # 2. Windows PE executable disguised as PDF
+    pe_exe = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00"
+    resp_pe = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "FIR"},
+        files={"file": ("malware.pdf", pe_exe, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    assert resp_pe.status_code == 415, resp_pe.text
+    assert "Unsupported file type" in resp_pe.json()["detail"]
+
+    # 3. Linux ELF executable disguised as JPEG image
+    elf_bin = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    resp_elf = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "FIR"},
+        files={"file": ("exploit.jpg", elf_bin, "image/jpeg")},
+        headers=auth_headers(io_token),
+    )
+    assert resp_elf.status_code == 415, resp_elf.text
+    assert "Unsupported file type" in resp_elf.json()["detail"]
 
 
 def test_upload_deduplication_returns_existing_document(client, make_user, db_session):

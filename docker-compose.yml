@@ -38,6 +38,8 @@ services:
   api:
     build: ./api
     env_file: .env
+    environment:
+      - OBJECT_STORAGE_BACKEND=minio
     depends_on:
       - db
       - redis

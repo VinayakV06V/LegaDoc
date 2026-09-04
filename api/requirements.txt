@@ -9,7 +9,7 @@ bcrypt==4.2.0
 python-multipart==0.0.9
 celery==5.4.0
 redis==5.0.8
-boto3==1.35.24
+boto3==1.43.85
 
 # Test tooling — the suite runs against in-memory SQLite, no external services needed
 pytest==9.1.1

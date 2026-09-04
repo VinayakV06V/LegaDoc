@@ -17,13 +17,16 @@ from pathlib import Path
 
 class ObjectStorage(ABC):
     @abstractmethod
-    def put(self, key: str, data: bytes) -> None: ...
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None: ...
 
     @abstractmethod
     def get(self, key: str) -> bytes: ...
 
     @abstractmethod
     def exists(self, key: str) -> bool: ...
+
+    @abstractmethod
+    def get_presigned_url(self, key: str, expires_in: int = 300) -> str: ...
 
 
 class LocalObjectStorage(ObjectStorage):
@@ -43,7 +46,7 @@ class LocalObjectStorage(ObjectStorage):
             raise ValueError(f"Refusing to write outside storage root: {key}")
         return full
 
-    def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
@@ -55,6 +58,84 @@ class LocalObjectStorage(ObjectStorage):
 
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
+
+    def get_presigned_url(self, key: str, expires_in: int = 300) -> str:
+        # Stand-in URL for local disk testing
+        return f"/local-storage/{key}?expires={expires_in}"
+
+
+class MinIOObjectStorage(ObjectStorage):
+    """Production MinIO S3-compatible storage.
+    Enforces Server-Side Encryption (AES256 in prod) and short-lived presigned URLs."""
+
+    def __init__(
+        self,
+        endpoint_url: str,
+        access_key: str,
+        secret_key: str,
+        bucket: str,
+        region_name: str = "us-east-1",
+        env: str = "local",
+    ):
+        import boto3
+        from botocore.client import Config
+
+        self.bucket = bucket
+        self.env = env
+        self.client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(signature_version="s3v4"),
+            region_name=region_name,
+        )
+        self._bucket_ensured = False
+
+    def _ensure_bucket(self):
+        if not self._bucket_ensured:
+            try:
+                self.client.head_bucket(Bucket=self.bucket)
+            except Exception:
+                try:
+                    self.client.create_bucket(Bucket=self.bucket)
+                except Exception:
+                    pass
+            self._bucket_ensured = True
+
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+        self._ensure_bucket()
+        extra_args = {"ContentType": content_type}
+        if self.env not in ("local", "test", "dev"):
+            extra_args["ServerSideEncryption"] = "AES256"
+
+        self.client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            **extra_args,
+        )
+
+    def get(self, key: str) -> bytes:
+        self._ensure_bucket()
+        obj = self.client.get_object(Bucket=self.bucket, Key=key)
+        return obj["Body"].read()
+
+    def exists(self, key: str) -> bool:
+        self._ensure_bucket()
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except Exception:
+            return False
+
+    def get_presigned_url(self, key: str, expires_in: int = 300) -> str:
+        self._ensure_bucket()
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
 
 
 def object_key(org_id, case_id, doc_id, version: int) -> str:
@@ -69,10 +150,25 @@ _default_storage = None
 
 
 def get_storage() -> ObjectStorage:
-    """FastAPI dependency. Local dir defaults to ./data/objects — override
-    via OBJECT_STORAGE_LOCAL_DIR for tests so nothing pollutes the repo."""
+    """FastAPI dependency. Uses MinIO if configured and not running in local test mode;
+    otherwise falls back to LocalObjectStorage (used by pytest suites)."""
     global _default_storage
     if _default_storage is None:
-        root = os.environ.get("OBJECT_STORAGE_LOCAL_DIR", "./data/objects")
-        _default_storage = LocalObjectStorage(root)
+        from app.config import settings
+
+        if getattr(settings, "OBJECT_STORAGE_BACKEND", "local") == "minio" and settings.ENV != "test":
+            try:
+                _default_storage = MinIOObjectStorage(
+                    endpoint_url=settings.OBJECT_STORAGE_ENDPOINT,
+                    access_key=settings.OBJECT_STORAGE_ACCESS_KEY,
+                    secret_key=settings.OBJECT_STORAGE_SECRET_KEY,
+                    bucket=settings.OBJECT_STORAGE_BUCKET,
+                    env=settings.ENV,
+                )
+            except Exception:
+                root = os.environ.get("OBJECT_STORAGE_LOCAL_DIR", "./data/objects")
+                _default_storage = LocalObjectStorage(root)
+        else:
+            root = os.environ.get("OBJECT_STORAGE_LOCAL_DIR", "./data/objects")
+            _default_storage = LocalObjectStorage(root)
     return _default_storage

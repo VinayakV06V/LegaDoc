@@ -19,7 +19,8 @@ import pytest
 # worker` in an ocr_worker test would collide and silently reuse whichever
 # one loaded first. Give this a `sys.modules` alias if that happens, or
 # rename these entrypoints to something globally unique.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "workers", "chain_worker"))
+_worker_path = "/workers/chain_worker" if os.path.exists("/workers/chain_worker") else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "workers", "chain_worker")
+sys.path.insert(0, _worker_path)
 
 import worker as chain_worker_module  # noqa: E402
 from fabric_client import FabricSubmissionError  # noqa: E402

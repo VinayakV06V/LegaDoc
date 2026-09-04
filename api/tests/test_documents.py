@@ -309,3 +309,94 @@ def test_redact_tag_adds_a_correction_and_extends_the_audit_hash_chain(client, m
 
     # And the metadata never contains the actual phone number — only the span.
     assert "9876543210" not in str(entries[1].action_metadata)
+
+
+def test_upload_disguised_executable_rejected_by_magic_bytes(client, make_user, db_session):
+    """MIME sniffing check: sending binary executable bytes with a .pdf extension
+    is rejected with 415 Unsupported Media Type."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+
+    # Shell script disguised as PDF
+    fake_pdf = b"#!/bin/bash\nrm -rf /"
+    resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Case Diary"},
+        files={"file": ("malicious.pdf", fake_pdf, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+
+    # python-magic detects this is text/x-shellscript, not application/pdf
+    assert resp.status_code == 415, resp.text
+    assert "Unsupported file type" in resp.json()["detail"]
+
+
+def test_upload_deduplication_returns_existing_document(client, make_user, db_session):
+    """Uploading the exact same file twice for the same case & doc_type
+    returns the existing document row instead of creating duplicate versions."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    pdf_content = b"%PDF-1.4 sample pdf content for dedup testing"
+
+    # Upload 1
+    resp1 = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "FIR"},
+        files={"file": ("fir.pdf", pdf_content, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    assert resp1.status_code == 202
+    doc1 = resp1.json()
+    assert doc1["version"] == 1
+
+    # Upload 2 (identical content)
+    resp2 = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "FIR"},
+        files={"file": ("fir_copy.pdf", pdf_content, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    assert resp2.status_code == 202
+    doc2 = resp2.json()
+
+    # Must return the same document ID and version 1 without creating v2
+    assert doc2["id"] == doc1["id"]
+    assert doc2["version"] == 1
+
+    count = db_session.query(models.Document).filter_by(case_id=UUID(case["id"])).count()
+    assert count == 1
+
+
+def test_unauthorized_role_cannot_upload_evidence(client, make_user, db_session):
+    """Roles not in UPLOAD_ALLOWED_ROLES (like defense) are rejected with 403."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    defense_user = make_user("defense", email="lawyer@bar.in", password="pw")
+    defense_token = login(client, "lawyer@bar.in", "pw").json()["access_token"]
+
+    resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "FIR"},
+        files={"file": ("test.pdf", b"%PDF-1.4 dummy", "application/pdf")},
+        headers=auth_headers(defense_token),
+    )
+    assert resp.status_code == 403
+
+
+def test_get_document_returns_download_url(client, make_user, db_session):
+    """GET /documents/{id} provides a presigned download_url for retrieving the raw object."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    pdf_content = b"%PDF-1.4 dummy document for presigned download test"
+
+    upload_resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "FIR"},
+        files={"file": ("doc.pdf", pdf_content, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    doc_id = upload_resp.json()["id"]
+
+    get_resp = client.get(f"/documents/{doc_id}", headers=auth_headers(io_token))
+    assert get_resp.status_code == 200
+    body = get_resp.json()
+    assert "download_url" in body
+    assert body["download_url"] is not None
+    assert "/local-storage/" in body["download_url"] or "http" in body["download_url"]
+

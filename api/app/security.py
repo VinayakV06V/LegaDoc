@@ -130,6 +130,17 @@ def require_role(*allowed_roles: str):
 # row for this exact case, or a Court order that touches it.
 _UNRESTRICTED_CASE_ROLES = {"config_admin", "security_auditor", "court", "prosecutor", "sho"}
 
+_POLICE_SPECIALIST_ROLES = {
+    "duty_officer",
+    "women_cell",
+    "cyber_cell",
+    "narcotics_police",
+    "traffic_police",
+    "crime_scene_unit",
+    "rescue_team",
+    "counselor",
+}
+
 # Roles that see a document's full, unredacted text once they already have
 # case access — everyone else gets the AI-Parser-tagged spans masked. This
 # is a baseline simplification of the Access Model's real nuance (Duty
@@ -152,6 +163,8 @@ def assert_case_access(case_id, claims: dict, db: Session) -> None:
     """
     role = claims.get("role")
     if role in _UNRESTRICTED_CASE_ROLES:
+        return
+    if role in _POLICE_SPECIALIST_ROLES:
         return
     if role == "io":
         user_id = UUID(claims["sub"])
@@ -179,3 +192,36 @@ def verify_case_access(case_id: str, claims: dict = Depends(get_current_claims),
     for routes that need this check but don't have case_id in the path."""
     assert_case_access(case_id, claims, db)
     return claims
+
+
+def verify_evidence_request_org_access(
+    request_id,
+    claims: dict,
+    db: Session,
+) -> models.EvidenceRequest:
+    """Validates that external authorities (FSL, Hospital, Bank, etc.) only touch
+    evidence requests specifically routed to their organization (Domain 2-4 scoping)."""
+    try:
+        req_uuid = request_id if isinstance(request_id, UUID) else UUID(str(request_id))
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence request not found")
+
+    req = db.get(models.EvidenceRequest, req_uuid)
+    if req is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence request not found")
+
+    role = claims.get("role", "")
+    user_org_id = claims.get("org_id", "")
+
+    if role in ("config_admin", "security_auditor"):
+        return req
+
+    if role == "authority_staff":
+        if str(req.requested_org_id) != str(user_org_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access restricted: this evidence request is routed to a different organization",
+            )
+        return req
+
+    return req

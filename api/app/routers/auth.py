@@ -12,8 +12,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=schemas.TokenResponse)
 def login(body: schemas.LoginRequest, db: Session = Depends(get_db)):
-    """POST /auth/login — Public. Authenticates user by official email or Government Service ID.
-    Issues short-lived access token + refresh token bound strictly to authoritative user role.
+    """POST /auth/login — Public. Issue an access token (15 min) + refresh
+    token (7 days). Accepts either official government email or Government Service ID.
+
+    Constant-time on purpose: an unknown email/service ID still runs a bcrypt check
+    (against a placeholder hash, see security.DUMMY_HASH) so response timing
+    can't be used to enumerate which credentials belong to real officer accounts.
+    Same generic error either way — never reveal which of identifier/password
+    was wrong.
+
+    NOTE: real IP-based rate limiting (settings.LOGIN_RATE_LIMIT, 10/min)
+    belongs at the ASGI middleware layer, not in this handler.
     """
     ident = body.email.strip()
     user = (
@@ -43,6 +52,10 @@ def get_current_user_profile(
 ):
     """GET /auth/me — Authenticated. Returns authoritative user profile, department,
     government service ID, authoritative role, and assigned permissions list.
+
+    Resolves permissions dynamically from the assigned Role entity in PostgreSQL/SQLite.
+    Guarantees that frontend clients receive verified server-side claims rather than
+    allowing client-side role selection.
     """
     # Resolve permissions from user's role
     permissions = []
@@ -74,7 +87,9 @@ def get_current_user_profile(
 
 @router.post("/refresh", response_model=schemas.AccessTokenResponse)
 def refresh_token(body: schemas.RefreshRequest):
-    """POST /auth/refresh — Exchange a valid refresh token for a new access token."""
+    """POST /auth/refresh — Exchange a valid refresh token for a new access
+    token. Not in the original endpoint table — added because a 15-minute
+    access-token TTL is unusable without this."""
     claims = security.decode_token(body.refresh_token, expected_type="refresh")
     new_access = security.create_access_token(claims["sub"], claims["org_id"], claims["role"])
     return schemas.AccessTokenResponse(access_token=new_access)
@@ -82,6 +97,12 @@ def refresh_token(body: schemas.RefreshRequest):
 
 @router.post("/logout")
 def logout(claims: dict = Depends(security.get_current_claims)):
-    """POST /auth/logout — Stateless session invalidation."""
-    return {"status": "logged out"}
+    """POST /auth/logout — Not in the original endpoint table.
 
+    Baseline behavior: stateless. The 15-minute access-token TTL bounds the
+    exposure window on its own. LATER (see SYSTEM_DESIGN.md): write the
+    token's JTI to a Redis revocation set (settings.TOKEN_REVOCATION_REDIS_DB)
+    with a TTL matching its remaining lifetime, so a shared-device logout
+    invalidates the session immediately instead of waiting out the TTL.
+    """
+    return {"status": "logged out"}

@@ -8,7 +8,7 @@ python-jose[cryptography]==3.5.0
 bcrypt==4.2.0
 python-multipart==0.0.9
 celery==5.4.0
-redis==5.0.8
+redis==8.1.0
 boto3==1.43.85
 
 # Test tooling — the suite runs against in-memory SQLite, no external services needed

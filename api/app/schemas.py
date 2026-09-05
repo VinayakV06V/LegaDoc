@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 # ---------- Auth ----------
@@ -322,5 +322,47 @@ class CaseChainIntegrityResponse(BaseModel):
     total_entries: int
     latest_hash: Optional[str] = None
     verified_at: datetime
+
+
+# ---------- NCRB De-Identified Reporting (Domain 7) ----------
+class CaseMetadataDeidentified(BaseModel):
+    """Structurally excludes all identity fields. Only aggregate/statistical fields."""
+    id: UUID
+    case_number: str
+    crime_type: str
+    court_level: Optional[str] = None
+    investigation_status: str
+    bail_status: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- IO Reassignment (Flow 1) ----------
+class ReassignIORequest(BaseModel):
+    new_io_user_id: UUID
+    reason: Optional[str] = Field(None, max_length=250)
+
+
+class ReassignIOResponse(BaseModel):
+    case_id: UUID
+    previous_io_user_id: UUID
+    new_io_user_id: UUID
+    reassigned_at: datetime
+
+
+# ---------- Document Review Queue (Flow 2) ----------
+class DocumentReviewItem(BaseModel):
+    """List queue item. raw_text is intentionally excluded to prevent bulk PII leaks."""
+    id: UUID
+    case_id: UUID
+    doc_type: str
+    version: int
+    status: str
+    chain_status: str
+    doc_hash: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 

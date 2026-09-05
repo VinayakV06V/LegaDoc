@@ -126,19 +126,96 @@ def assign_io(
     return {"case_id": case_id, "io_user_id": str(body.io_user_id), "assigned_at": assignment.assigned_at}
 
 
-@router.post("/{case_id}/reassign-io")
-def reassign_io(case_id: str, claims: dict = Depends(require_role("sho", "config_admin"))):
+@router.post("/{case_id}/reassign-io", response_model=schemas.ReassignIOResponse)
+def reassign_io(
+    case_id: str,
+    body: schemas.ReassignIORequest,
+    claims: dict = Depends(require_role("sho", "config_admin")),
+    db: Session = Depends(get_db),
+):
     """POST /cases/:id/reassign-io — SHO / Config Admin. Reassign IO
     mid-case. Logged as its own audit event; EvidenceRequest ownership
     follows the Case, not the individual IO, so in-flight requests transfer
     transparently.
-
-    Not implemented in this baseline — assign-io (above) is the fully
-    working reference implementation to build this from; the only real
-    difference is closing out the previous CaseAssignment row and writing
-    an audit_log entry recording the change.
     """
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    try:
+        case_uuid = UUID(str(case_id))
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    case = db.get(models.Case, case_uuid)
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    # Terminal case state invariant: closed/disposed cases cannot have their IO reassigned
+    if case.investigation_status in ("Judgment", "Disposed"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot reassign IO on a concluded case",
+        )
+
+    # Validate target user existence and role
+    new_io_user = db.get(models.User, body.new_io_user_id)
+    if new_io_user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IO user not found")
+
+    if new_io_user.role != "io":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target user must have 'io' role to be assigned as Investigating Officer",
+        )
+
+    # Current assignment checks
+    current_assignment = (
+        db.query(models.CaseAssignment)
+        .filter(models.CaseAssignment.case_id == case_uuid)
+        .first()
+    )
+    if current_assignment is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No IO currently assigned; use assign-io instead",
+        )
+
+    if current_assignment.io_user_id == new_io_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Case is already assigned to this IO",
+        )
+
+    previous_io_id = current_assignment.io_user_id
+
+    # Atomic swap: delete old assignment, insert new assignment
+    db.query(models.CaseAssignment).filter(models.CaseAssignment.case_id == case_uuid).delete()
+    new_assignment = models.CaseAssignment(case_id=case_uuid, io_user_id=new_io_user.id)
+    db.add(new_assignment)
+    db.flush()
+
+    # Tamper-evident audit log with reason sanitization (length capped via schema)
+    reason_clean = (body.reason or "").strip()
+    write_audit_log(
+        db,
+        action="io_reassigned",
+        case_id=case_uuid,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="case_assignment",
+        target_id=new_assignment.id,
+        metadata={
+            "previous_io_id": str(previous_io_id),
+            "new_io_id": str(new_io_user.id),
+            "reason": reason_clean,
+        },
+    )
+
+    db.commit()
+    db.refresh(new_assignment)
+
+    return schemas.ReassignIOResponse(
+        case_id=case_uuid,
+        previous_io_user_id=previous_io_id,
+        new_io_user_id=new_io_user.id,
+        reassigned_at=new_assignment.assigned_at,
+    )
 
 
 @router.post(

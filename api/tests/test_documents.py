@@ -3,7 +3,7 @@
 logic. OCR/AI-Parser/Chain Worker task bodies are not exercised here — they
 stay stubs, see workers/*/worker.py."""
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app import models
 from app.audit import verify_chain_intact
@@ -419,4 +419,173 @@ def test_get_document_returns_download_url(client, make_user, db_session):
     assert "download_url" in body
     assert body["download_url"] is not None
     assert "/local-storage/" in body["download_url"] or "http" in body["download_url"]
+
+
+# ==================== Document Review Queue Tests (Flow 2) ====================
+
+def _create_review_doc(db_session, case_id, uploaded_by_user_id, doc_type="FIR", status="needs_review"):
+    doc = models.Document(
+        case_id=UUID(case_id) if isinstance(case_id, str) else case_id,
+        doc_type=doc_type,
+        version=1,
+        storage_path=f"test/{case_id}/{uuid4()}/v1",
+        raw_text="Confidential OCR text that should not appear in queue summary",
+        status=status,
+        chain_status="pending",
+        uploaded_by=uploaded_by_user_id,
+    )
+    db_session.add(doc)
+    db_session.commit()
+    db_session.refresh(doc)
+    return doc
+
+
+def _setup_case_with_io_unique(client, make_user, db_session):
+    prefix = uuid4().hex[:6]
+    duty = make_user("duty_officer", email=f"duty_{prefix}@example.com", password="pw")
+    sho = make_user("sho", email=f"sho_{prefix}@example.com", password="pw", org=duty.organization)
+    io = make_user("io", email=f"io_{prefix}@example.com", password="pw", org=duty.organization)
+    duty_token = login(client, duty.email, "pw").json()["access_token"]
+    case_resp = client.post(
+        "/cases",
+        json={"crime_type": "Theft", "complaint_text": "..."},
+        headers=auth_headers(duty_token),
+    )
+    case = case_resp.json()
+    sho_token = login(client, sho.email, "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+    io_token = login(client, io.email, "pw").json()["access_token"]
+    return case, io, io_token
+
+
+def test_config_admin_sees_all_needs_review_documents(client, make_user, db_session):
+    """Config Admin sees needs_review documents across all cases."""
+    case1, io1, _ = _setup_case_with_io_unique(client, make_user, db_session)
+    case2, io2, _ = _setup_case_with_io_unique(client, make_user, db_session)
+
+    _create_review_doc(db_session, case1["id"], io1.id, doc_type="FIR", status="needs_review")
+    _create_review_doc(db_session, case2["id"], io2.id, doc_type="Post-Mortem Report", status="needs_review")
+    _create_review_doc(db_session, case1["id"], io1.id, doc_type="Seizure Memo", status="ready")  # not in queue
+
+    admin = make_user("config_admin", email=f"admin_{uuid4().hex[:6]}@police.gov.in", password="pw")
+    admin_token = login(client, admin.email, "pw").json()["access_token"]
+
+    resp = client.get("/documents?status=needs_review", headers=auth_headers(admin_token))
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) >= 2
+    assert all(d["status"] == "needs_review" for d in items)
+    case_ids = {d["case_id"] for d in items}
+    assert case1["id"] in case_ids
+    assert case2["id"] in case_ids
+
+
+def test_io_only_sees_needs_review_docs_for_assigned_cases(client, make_user, db_session):
+    """Tenancy & Isolation: IO only sees needs_review docs for their assigned case(s)."""
+    case1, io1, io1_token = _setup_case_with_io_unique(client, make_user, db_session)
+    case2, io2, io2_token = _setup_case_with_io_unique(client, make_user, db_session)
+
+    doc1 = _create_review_doc(db_session, case1["id"], io1.id, doc_type="FIR", status="needs_review")
+    doc2 = _create_review_doc(db_session, case2["id"], io2.id, doc_type="Charge Sheet", status="needs_review")
+
+    # IO 1 sees only doc1
+    r1 = client.get("/documents?status=needs_review", headers=auth_headers(io1_token))
+    assert r1.status_code == 200
+    ids1 = [d["id"] for d in r1.json()]
+    assert str(doc1.id) in ids1
+    assert str(doc2.id) not in ids1
+
+    # IO 2 sees only doc2
+    r2 = client.get("/documents?status=needs_review", headers=auth_headers(io2_token))
+    assert r2.status_code == 200
+    ids2 = [d["id"] for d in r2.json()]
+    assert str(doc2.id) in ids2
+    assert str(doc1.id) not in ids2
+
+
+def test_review_queue_empty_when_no_flagged_docs(client, make_user, db_session):
+    """Empty queue state returns 200 OK with [] without error."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    _create_review_doc(db_session, case["id"], io.id, status="ready")  # no doc has needs_review
+
+    resp = client.get("/documents?status=needs_review", headers=auth_headers(io_token))
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_review_queue_structural_pii_exclusion(client, make_user, db_session):
+    """DocumentReviewItem schema must structurally exclude raw_text to prevent bulk PII leaks."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    _create_review_doc(db_session, case["id"], io.id, status="needs_review")
+
+    resp = client.get("/documents?status=needs_review", headers=auth_headers(io_token))
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) > 0
+
+    first = items[0]
+    assert "raw_text" not in first
+    assert "text" not in first
+    assert "Confidential" not in str(items)
+
+    expected_keys = {"id", "case_id", "doc_type", "version", "status", "chain_status", "doc_hash", "created_at"}
+    assert set(first.keys()) == expected_keys
+
+
+def test_review_queue_pagination_bounds(client, make_user, db_session):
+    """Pagination parameters limit/offset work cleanly, negative params return 422."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    for _ in range(4):
+        _create_review_doc(db_session, case["id"], io.id, status="needs_review")
+
+    # Limit = 2
+    r_paged = client.get("/documents?status=needs_review&limit=2&offset=1", headers=auth_headers(io_token))
+    assert r_paged.status_code == 200
+    assert len(r_paged.json()) == 2
+
+    # Boundary checks: limit < 1 or limit > 100 triggers 422
+    assert client.get("/documents?status=needs_review&limit=0", headers=auth_headers(io_token)).status_code == 422
+    assert client.get("/documents?status=needs_review&limit=500", headers=auth_headers(io_token)).status_code == 422
+    # Boundary check: negative offset triggers 422
+    assert client.get("/documents?status=needs_review&offset=-1", headers=auth_headers(io_token)).status_code == 422
+
+
+def test_review_queue_invalid_status_filter_rejected(client, make_user, db_session):
+    """Querying with an unrecognized status filter returns 400 Bad Request."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    resp = client.get("/documents?status=unrecognized_status", headers=auth_headers(io_token))
+    assert resp.status_code == 400
+    assert "Invalid document status filter" in resp.json()["detail"]
+
+
+def test_review_queue_defaults_to_needs_review_status(client, make_user, db_session):
+    """Calling GET /documents without explicit status query param defaults to needs_review."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+    doc_review = _create_review_doc(db_session, case["id"], io.id, doc_type="FIR", status="needs_review")
+    doc_ready = _create_review_doc(db_session, case["id"], io.id, doc_type="Medical Report", status="ready")
+
+    resp = client.get("/documents", headers=auth_headers(io_token))
+    assert resp.status_code == 200
+    items = resp.json()
+    ids = [d["id"] for d in items]
+    assert str(doc_review.id) in ids
+    assert str(doc_ready.id) not in ids
+
+
+def test_unauthorized_roles_cannot_access_review_queue(client, make_user, db_session):
+    """Negative space: unauthenticated and unauthorized roles receive 401/403."""
+    # 1. Unauthenticated
+    assert client.get("/documents?status=needs_review").status_code == 401
+
+    # 2. Unauthorized roles (SHO, Duty Officer, Prosecutor, Defense, Court, NCRB Analyst)
+    unauthorized_roles = ["sho", "duty_officer", "prosecutor", "defense", "court", "records_ncrb_analyst"]
+    for role in unauthorized_roles:
+        u = make_user(role, email=f"{role}_{uuid4().hex[:6]}@example.com", password="pw")
+        tok = login(client, u.email, "pw").json()["access_token"]
+        r = client.get("/documents?status=needs_review", headers=auth_headers(tok))
+        assert r.status_code == 403, f"Role {role} should have been denied with 403, got {r.status_code}"
 

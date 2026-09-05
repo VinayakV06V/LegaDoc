@@ -153,17 +153,41 @@ async def upload_document(
     return document
 
 
-@router.get("")
+@router.get("", response_model=list[schemas.DocumentReviewItem])
 def list_documents_needing_review(
-    status_filter: Optional[str] = Query(default=None, alias="status"),
+    status_filter: Optional[str] = Query(default="needs_review", alias="status"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     claims: dict = Depends(require_role("config_admin", "io")),
+    db: Session = Depends(get_db),
 ):
     """GET /documents?status=needs_review — Config Admin / Investigating
-    Officer. Not implemented in this pass — deferred alongside the AI
-    Parser worker itself, since a document can only reach needs_review
-    through a pipeline stage (real Presidio/spaCy tagging) that isn't wired
-    up in this environment."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    Officer. Lists documents flagged for manual review or falling back from OCR/AI-Parser.
+    - When called by an IO: scoped strictly to cases assigned to that IO.
+    - When called by Config Admin: across all cases.
+    - raw_text is structurally excluded from the list schema to prevent bulk PII leaks.
+    """
+    target_status = status_filter if status_filter is not None else "needs_review"
+    if target_status not in ("needs_review", "processing", "ready"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document status filter '{target_status}'. Must be one of: needs_review, processing, ready",
+        )
+
+    query = db.query(models.Document).filter(models.Document.status == target_status)
+
+    user_role = claims.get("role")
+    if user_role == "io":
+        user_id = UUID(claims["sub"])
+        query = query.join(
+            models.CaseAssignment,
+            models.CaseAssignment.case_id == models.Document.case_id,
+        ).filter(models.CaseAssignment.io_user_id == user_id)
+
+    # Order FIFO (oldest first) so review backlogs don't starve
+    docs = query.order_by(models.Document.created_at.asc()).offset(offset).limit(limit).all()
+
+    return docs
 
 
 @router.get("/{document_id}", response_model=schemas.DocumentView)

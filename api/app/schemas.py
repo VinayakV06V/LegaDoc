@@ -260,3 +260,67 @@ class CaseDiaryResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+# ---------- Case Audit Trail & Verification (Flow 6) ----------
+class AuditLogEntry(BaseModel):
+    id: UUID
+    case_id: Optional[UUID] = None
+    actor_user_id: Optional[UUID] = None
+    actor_name: Optional[str] = None
+    actor_email: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[UUID] = None
+    action_metadata: Optional[dict] = None
+    prev_hash: Optional[str] = None
+    row_hash: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CaseAuditLogFullResponse(BaseModel):
+    case_id: UUID
+    view_type: str = "full"
+    chain_intact: bool
+    total_entries: int
+    entries: list[AuditLogEntry]
+
+
+class CaseAuditLogSummaryResponse(BaseModel):
+    case_id: UUID
+    view_type: str = "summary"
+    chain_intact: bool
+    total_entries: int
+    action_counts: dict[str, int]
+    first_entry_at: Optional[datetime] = None
+    last_entry_at: Optional[datetime] = None
+
+
+class AIParserAuditEntry(BaseModel):
+    id: UUID
+    document_id: Optional[UUID] = None
+    action: str
+    actor_type: str  # "system" or "human"
+    actor_user_id: Optional[UUID] = None
+    entity_type: Optional[str] = None
+    confidence: Optional[int] = None
+    span_start: Optional[int] = None
+    span_end: Optional[int] = None
+    created_at: datetime
+
+
+class AIParserAuditResponse(BaseModel):
+    case_id: UUID
+    total_entries: int
+    entries: list[AIParserAuditEntry]
+
+
+class CaseChainIntegrityResponse(BaseModel):
+    case_id: UUID
+    chain_intact: bool
+    total_entries: int
+    latest_hash: Optional[str] = None
+    verified_at: datetime
+
+

@@ -123,7 +123,7 @@ def verify_case_chain_integrity(db: Session, case_id) -> dict:
       case_id, chain_intact, total_entries, latest_hash
     """
     case_uuid = case_id if isinstance(case_id, UUID) else UUID(str(case_id))
-    rows = db.query(models.AuditLog).order_by(models.AuditLog.created_at.asc()).all()
+    rows = db.query(models.AuditLog).order_by(models.AuditLog.seq.asc()).all()
     prev_hash = None
     chain_intact = True
     case_rows = []

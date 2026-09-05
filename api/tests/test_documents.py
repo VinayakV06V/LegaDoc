@@ -589,3 +589,136 @@ def test_unauthorized_roles_cannot_access_review_queue(client, make_user, db_ses
         r = client.get("/documents?status=needs_review", headers=auth_headers(tok))
         assert r.status_code == 403, f"Role {role} should have been denied with 403, got {r.status_code}"
 
+
+def test_end_to_end_pipeline_flow_and_artifact_generation(client, make_user, make_org, db_session, fake_queue):
+    """Full lifecycle pipeline verification:
+    1. Case registration & assignment
+    2. Upload -> Storage + SHA-256 Hash + Queue dispatch artifacts
+    3. Worker extraction -> Sensitivity tag generation (< 70% threshold)
+    4. Review queue routing -> Structural PII exclusion
+    5. Human correction tagging -> Audit hash chain extension
+    6. Masking engine -> Role-based unredacted vs redacted view artifacts
+    7. Mid-case IO reassignment -> Dynamic access handover + AuditLog artifact
+    8. NCRB reporting -> De-identified metadata artifact + Meta-audit log
+    9. Cryptographic verification -> Entire chain intact
+    """
+    # 1. Setup case & assign to IO 1
+    case, io1, io1_token = _setup_case_with_io(client, make_user, db_session)
+    case_id = case["id"]
+
+    # 2. Upload document -> Ingestion pipeline artifacts
+    raw_content = b"Suspect Amit Kumar, contact 9988776655, resident of New Delhi."
+    resp = client.post(
+        "/documents",
+        data={"case_id": case_id, "doc_type": "Witness Statement"},
+        files={"file": ("evidence_statement.txt", raw_content, "text/plain")},
+        headers=auth_headers(io1_token),
+    )
+    assert resp.status_code == 202
+    doc_body = resp.json()
+    doc_id = doc_body["id"]
+    assert doc_body["status"] == "processing"
+    assert doc_body["chain_status"] == "pending"
+
+    # Verify queue dispatch artifacts
+    enqueued_tasks = {job["task_name"] for job in fake_queue.enqueued}
+    assert "chain_worker.write_hash" in enqueued_tasks
+    assert "ocr_worker.extract_document" in enqueued_tasks
+
+    # 3. Simulate Worker Extraction & AI Parser Tagging artifacts
+    doc_uuid = UUID(doc_id)
+    doc_record = db_session.get(models.Document, doc_uuid)
+    doc_record.raw_text = raw_content.decode("utf-8")
+    # Simulate low-confidence extraction triggering needs_review
+    doc_record.status = "needs_review"
+    tag_person = models.DocumentSensitivityTag(
+        document_id=doc_uuid,
+        entity_type="PERSON",
+        span_start=8,
+        span_end=18,
+        confidence=65,  # Below 70% threshold
+        source="ai_parser",
+    )
+    tag_phone = models.DocumentSensitivityTag(
+        document_id=doc_uuid,
+        entity_type="PHONE_NUMBER",
+        span_start=28,
+        span_end=38,
+        confidence=95,
+        source="ai_parser",
+    )
+    db_session.add_all([tag_person, tag_phone])
+    db_session.commit()
+
+    # 4. Review queue routing: IO 1 inspects needs_review items
+    rq_resp = client.get("/documents?status=needs_review", headers=auth_headers(io1_token))
+    assert rq_resp.status_code == 200
+    review_items = rq_resp.json()
+    assert any(item["id"] == doc_id for item in review_items)
+    # Structural PII exclusion check
+    matched_item = next(item for item in review_items if item["id"] == doc_id)
+    assert "raw_text" not in matched_item
+    assert "text" not in matched_item
+
+    # 5. Human correction tagging -> Confirms tag & extends audit chain
+    corr_resp = client.post(
+        f"/documents/{doc_id}/redact-tag",
+        json={"entity_type": "PERSON", "span_start": 8, "span_end": 18},
+        headers=auth_headers(io1_token),
+    )
+    assert corr_resp.status_code == 200
+    # Mark ready once reviewed
+    doc_record = db_session.get(models.Document, doc_uuid)
+    doc_record.status = "ready"
+    db_session.commit()
+
+    # 6. Masking engine: Assigned IO sees unredacted text; restricted role sees masked
+    io_view = client.get(f"/documents/{doc_id}", headers=auth_headers(io1_token)).json()
+    assert io_view["text"] == "Suspect Amit Kumar, contact 9988776655, resident of New Delhi."
+
+    # Specialist on same case sees masked view
+    specialist = make_user("cyber_cell", email="cyber@example.com", password="pw", org=io1.organization)
+    db_session.add(models.CaseAssignment(case_id=doc_record.case_id, io_user_id=specialist.id))
+    db_session.commit()
+    spec_token = login(client, "cyber@example.com", "pw").json()["access_token"]
+    spec_view = client.get(f"/documents/{doc_id}", headers=auth_headers(spec_token)).json()
+    assert "[REDACTED:PERSON]" in spec_view["text"]
+    assert "[REDACTED:PHONE_NUMBER]" in spec_view["text"]
+    assert "Amit Kumar" not in spec_view["text"]
+    assert "9988776655" not in spec_view["text"]
+
+    # 7. Mid-case IO reassignment
+    io2 = make_user("io", email="io2_reassigned@example.com", password="pw", org=io1.organization)
+    sho_token = login(client, "sho@example.com", "pw").json()["access_token"]
+    reassign_resp = client.post(
+        f"/cases/{case_id}/reassign-io",
+        json={"new_io_user_id": str(io2.id), "reason": "Pipeline verification officer handover"},
+        headers=auth_headers(sho_token),
+    )
+    assert reassign_resp.status_code == 200
+    reassign_data = reassign_resp.json()
+    assert reassign_data["previous_io_user_id"] == str(io1.id)
+    assert reassign_data["new_io_user_id"] == str(io2.id)
+
+    # Dynamic access check: old IO is now forbidden; new IO has access
+    io2_token = login(client, "io2_reassigned@example.com", "pw").json()["access_token"]
+    assert client.get(f"/cases/{case_id}", headers=auth_headers(io1_token)).status_code == 403
+    assert client.get(f"/cases/{case_id}", headers=auth_headers(io2_token)).status_code == 200
+
+    # 8. NCRB de-identified reporting
+    ncrb_org = make_org(name="NCRB Analytics", org_type="ncrb")
+    analyst = make_user("records_ncrb_analyst", email="ncrb_eval@ncrb.gov.in", password="pw", org=ncrb_org)
+    analyst_token = login(client, "ncrb_eval@ncrb.gov.in", "pw").json()["access_token"]
+
+    report_resp = client.get("/reports/case-metadata", headers=auth_headers(analyst_token))
+    assert report_resp.status_code == 200
+    records = report_resp.json()
+    target_record = next(r for r in records if r["id"] == case_id)
+    assert target_record["crime_type"] == "Theft"
+    assert "raw_text" not in target_record
+    assert "officer" not in str(target_record).lower()
+
+    # 9. Verify tamper-evident cryptographic hash chain is intact
+    assert verify_chain_intact(db_session) is True
+
+

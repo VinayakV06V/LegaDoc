@@ -230,5 +230,13 @@ class AuditLog(Base):
     action_metadata = Column(JSON, nullable=True)  # never the raw redacted text — see design doc
     prev_hash = Column(String, nullable=True)
     row_hash = Column(String, nullable=False)
+    # The chain's actual ordering/linking key — see app/audit.py's write_audit_log.
+    # NOT created_at: wall-clock time is not guaranteed to differ between two
+    # writes issued microseconds apart (proven in practice on this stack —
+    # several same-request writes landed with an IDENTICAL timestamp down to
+    # the microsecond, which silently broke prev_hash linkage for all but the
+    # first of them). seq is assigned as strictly prev.seq + 1 inside the same
+    # locked critical section as the hash computation, so it can never tie.
+    seq = Column(Integer, nullable=False)
     fabric_tx_id = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -413,7 +413,9 @@ def list_admin_audit_logs(
     if target_type:
         query = query.filter(models.AuditLog.target_type == target_type)
 
-    rows = query.order_by(models.AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    # seq, not created_at — see models.AuditLog.seq: wall-clock timestamps can tie
+    # between rapid writes, seq is the actual write-order guarantee.
+    rows = query.order_by(models.AuditLog.seq.desc()).offset(offset).limit(limit).all()
 
     # Pre-fetch user map for actor names
     actor_ids = {r.actor_user_id for r in rows if r.actor_user_id is not None}

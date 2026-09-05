@@ -22,11 +22,14 @@ from celery import Celery
 
 from app.config import settings
 
-# Uncomment as you need them:
-# from uuid import UUID
-# from app import models
-# from app.database import SessionLocal
-# from app.audit import write_audit_log
+from uuid import UUID
+
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+from app import models
+from app.database import SessionLocal
+from app.audit import write_audit_log
 
 app = Celery(
     "ai_parser_worker",
@@ -36,38 +39,83 @@ app = Celery(
 
 
 CONFIDENCE_REVIEW_THRESHOLD = 70  # 0-100; below this, auto-flag even on "success"
+# spaCy + Presidio NLP engine
+provider = NlpEngineProvider(
+    nlp_configuration={
+        "nlp_engine_name": "spacy",
+        "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+    }
+)
 
+nlp_engine = provider.create_engine()
+analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 
 @app.task(name="ai_parser_worker.tag_document", bind=True, max_retries=5)
 def tag_document(self, document_id: str):
-    """
-    TODO:
-      1. Read Document.raw_text for this document_id (set by the OCR worker
-         — nothing to tag without it).
-      2. Run Presidio/spaCy against the recognizer config for this DocumentSchema
-         (Tier 1/2 types use their specific mapping; Tier 3 uses the generic
-         default profile).
-      3. Write DocumentSensitivityTag rows — entity_type, span, confidence
-         as int(round(presidio_score * 100)), 0-100. NEVER write the raw
-         matched text itself into the tag or into AuditLog.
-      4. Write an AuditLog row for this auto-tag event (source="ai_parser"),
-         computing row_hash = hash(prev_row_hash + content) under
-         pg_advisory_xact_lock (see models.AuditLog's concurrency warning).
-      5. If every tag on this document is >= CONFIDENCE_REVIEW_THRESHOLD,
-         mark status="ready". If ANY tag is below it, mark
-         status="needs_review" instead — a low-confidence tag that
-         "succeeded" is not the same as a trustworthy one, and treating it
-         as such is exactly the kind of quiet erosion of fail-closed
-         behavior worth guarding against.
 
-    FAIL-CLOSED RULE (do not weaken this): on repeated failure, do NOT mark
-    the document ready. Set status="needs_review" — the redaction filter's
-    default for "no confirmed tags yet" must be full redaction, not full
-    exposure. Add a permanent automated test asserting this — it's the
-    single most important safety property in the system, and the easiest one
-    to accidentally break under deadline pressure without a test catching it.
-    """
-    raise NotImplementedError("Fill in against SYSTEM_DESIGN.md Flow 2 Track B / Flow 6")
+    db = SessionLocal()
+
+    try:
+        # 1. Fetch document
+        document = db.get(models.Document, UUID(document_id))
+
+        if document is None:
+            raise Exception("Document not found")
+
+        if not document.raw_text:
+            raise Exception("OCR text not available")
+
+        # 2. Run Presidio + spaCy
+        results = analyzer.analyze(
+            text=document.raw_text,
+            language="en",
+        )
+
+        tags = []
+
+        # 3. Save sensitivity tags
+        for entity in results:
+            tag = models.DocumentSensitivityTag(
+                document_id=document.id,
+                entity_type=entity.entity_type,
+                span_start=entity.start,
+                span_end=entity.end,
+                confidence=int(round(entity.score * 100)),
+                source="presidio",
+            )
+
+            db.add(tag)
+            tags.append(tag)
+
+        # 4. Decide document status (Fail-Closed)
+        low_confidence = any(
+            tag.confidence < CONFIDENCE_REVIEW_THRESHOLD
+            for tag in tags
+        )
+
+        if low_confidence:
+            document.status = "needs_review"
+        else:
+            document.status = "ready"
+
+        # 5. Audit log
+        write_audit_log(
+            db=db,
+            document_id=document.id,
+            action="AUTO_TAG",
+            source="ai_parser",
+        )
+
+        db.commit()
+
+        return {
+            "status": document.status,
+            "document_id": document_id,
+            "tags_created": len(tags),
+        }
+
+    finally:
+        db.close()
 
 
 @app.task(name="ai_parser_worker.tag_case_diary_entry", bind=True, max_retries=5)

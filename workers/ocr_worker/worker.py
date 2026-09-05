@@ -8,26 +8,26 @@ DB/storage access pattern matches workers/chain_worker/worker.py — reuse
 api/app's models/database/storage/config directly rather than duplicating
 the schema. Uncomment the imports below once you start filling this in.
 """
+
 import os
 import sys
 
-# Reuse api/app instead of duplicating the schema — see this file's
-# docstring and workers/chain_worker/worker.py for the same pattern.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "api"))
+sys.path.insert(
+    0,
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "api")
+)
 
-from celery import Celery
-
-from ocr_engine.config import settings
+from celery import Celery, current_app
 from uuid import UUID
 
-from ocr_engine import models
-from ocr_engine.database import SessionLocal
-from ocr_engine.storage import get_storage
+from app.config import settings
+from app import models
+from app.database import SessionLocal
+from app.storage import get_storage
+
 from ocr_engine.preprocess import preprocess_image
 from ocr_engine.ocr import run_ocr
 from ocr_engine.parser import parse_fir
-from ocr_engine.semantic import semantic_parse
-
 # Uncomment as you need them:
 # from uuid import UUID
 # from app import models
@@ -59,20 +59,35 @@ def extract_document(self, document_id: str):
         storage = get_storage()
         image_path = storage.get(document.storage_path)
 
-        # 3. Preprocess
+        # 3. Preprocess image
         processed_path = preprocess_image(image_path)
 
-        # 4. OCR
+        # 4. Run PaddleOCR
         ocr_result = run_ocr(processed_path)
 
-        # Convert OCR list into plain text
-        raw_text = "\n".join([x["text"] for x in ocr_result])
+        # 5. Convert OCR result into plain text
+        raw_text = "\n".join(item["text"] for item in ocr_result)
 
-        # 5. Save OCR text
+        # 6. Save raw OCR text
         document.raw_text = raw_text
         db.commit()
 
-        return {"status": "success"}
+        # 7. Generic FIR extraction
+        parsed_data = parse_fir(raw_text)
+
+        # 8. Send document to AI Parser worker
+        current_app.send_task(
+            "ai_parser_worker.tag_document",
+            args=[document_id],
+        )
+
+        # 9. Return OCR + parsed result
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "raw_text": raw_text,
+            "parsed_data": parsed_data,
+        }
 
     finally:
         db.close()

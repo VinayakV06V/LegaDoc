@@ -1,70 +1,73 @@
-import json
-import os
 import re
 
-INPUT = os.path.join("outputs", "ocr_result.json")
-OUTPUT = os.path.join("outputs", "parsed_fir.json")
+def parse_fir(raw_text: str):
+    """
+    Generic FIR parser
+    Input  : Raw OCR text
+    Output : Dictionary of extracted fields
+    """
 
-with open(INPUT, "r", encoding="utf-8") as f:
-    data = json.load(f)
+    parsed = {
+        "fir_number": None,
+        "district": None,
+        "police_station": None,
+        "year": None,
+        "registration_date": None,
+        "registration_time": None,
+        "ipc_sections": [],
+        "type_of_information": None,
+    }
 
-texts = [x["text"] for x in data]
+    # ---------- FIR Number ----------
+    m = re.search(
+        r"(?:FIR|F\.?I\.?R\.?)\s*(?:No\.?|Number)?[:\-\s]*([0-9]{1,4})/?(20\d{2})?",
+        raw_text,
+        re.IGNORECASE,
+    )
+    if m:
+        parsed["fir_number"] = m.group(1).zfill(4)
+        if m.group(2):
+            parsed["year"] = m.group(2)
 
-parsed = {
-    "fir_number": None,
-    "district": None,
-    "police_station": None,
-    "year": None,
-    "registration_date": None,
-    "registration_time": None,
-    "ipc_sections": [],
-    "type_of_information": "Written"
-}
+    # ---------- District ----------
+    m = re.search(r"District\s*[:\-]?\s*([A-Za-z ]+)", raw_text, re.IGNORECASE)
+    if m:
+        parsed["district"] = m.group(1).strip()
 
-# ---------- District ----------
-for t in texts:
-    if "KRKSETRA" in t.upper():
-        parsed["district"] = "Kurukshetra"
+    # ---------- Police Station ----------
+    m = re.search(r"P\.?S\.?\s*[:\-]?\s*([A-Za-z ]+)", raw_text, re.IGNORECASE)
+    if m:
+        parsed["police_station"] = m.group(1).strip()
 
-# ---------- Police Station ----------
-for t in texts:
-    if "SILLADAD" in t.upper():
-        parsed["police_station"] = "Shahabad"
+    # ---------- Registration Date ----------
+    m = re.search(r"\b\d{2}[/-]\d{2}[/-]\d{4}\b", raw_text)
+    if m:
+        parsed["registration_date"] = m.group()
 
-# ---------- FIR Number ----------
-for t in texts:
-    if "NR.03" in t.upper():
-        parsed["fir_number"] = "0380"
-
-# ---------- Year ----------
-# ---------- Year ----------
-parsed["year"] = "2017"
-
-# ---------- Registration Date ----------
-for t in texts:
-    if "07/2017" in t:
-        parsed["registration_date"] = "24/07/2017"
-
-# ---------- Registration Time ----------
-for t in texts:
-    m = re.search(r"\d{2}:\d{2}", t)
+    # ---------- Registration Time ----------
+    m = re.search(r"\b\d{2}:\d{2}\b", raw_text)
     if m:
         parsed["registration_time"] = m.group()
 
-# ---------- IPC Sections ----------
-for t in texts:
-    if "1600" in t:
-        parsed["ipc_sections"].append("380")
-    if "1460" in t:
-        parsed["ipc_sections"].append("457")
+    # ---------- IPC Sections ----------
+    ipc_sections = set()
 
-parsed["ipc_sections"] = list(set(parsed["ipc_sections"]))
+    matches = re.findall(
+        r"(?:IPC\s*Sections?|Sections?|U/S|Under\s*Section)\s*[:\-]?\s*([\d,\s/]+)",
+        raw_text,
+        re.IGNORECASE,
+    )
 
-with open(OUTPUT, "w", encoding="utf-8") as f:
-    json.dump(parsed, f, indent=4)
+    for match in matches:
+        nums = re.findall(r"\d{3}", match)
+        ipc_sections.update(nums)
 
-print("\n===== FIR PARSER OUTPUT =====\n")
-for k, v in parsed.items():
-    print(f"{k:22}: {v}")
+    parsed["ipc_sections"] = sorted(ipc_sections)
 
-print("\nSaved :", OUTPUT)
+    # ---------- Type of Information ----------
+    if re.search(r"Written", raw_text, re.IGNORECASE):
+        parsed["type_of_information"] = "Written"
+    elif re.search(r"Oral", raw_text, re.IGNORECASE):
+        parsed["type_of_information"] = "Oral"
+
+    return parsed

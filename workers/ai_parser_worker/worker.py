@@ -99,11 +99,16 @@ def tag_document(self, document_id: str):
             document.status = "ready"
 
         # 5. Audit log
+        # 5. Audit log
         write_audit_log(
             db=db,
-            document_id=document.id,
-            action="AUTO_TAG",
-            source="ai_parser",
+            action="auto_tag_completed",
+            target_type="document",
+            target_id=document.id,
+            metadata={
+                "tags_created": len(tags),
+                "source": "ai_parser",
+            },
         )
 
         db.commit()

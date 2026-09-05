@@ -1,59 +1,32 @@
 import cv2
-import numpy as np
 import os
 
-INPUT_PATH = os.path.join("uploads", "test.jpg")
-OUTPUT_PATH = os.path.join("processed", "processed.jpg")
+def preprocess_image(image_path: str) -> str:
+    """
+    Preprocess an uploaded image and return the processed image path.
+    """
 
-image = cv2.imread(INPUT_PATH)
+    image = cv2.imread(image_path)
 
-if image is None:
-    raise FileNotFoundError("Image not found")
+    if image is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
 
-gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-# ---------- Shadow Removal ----------
-dilated = cv2.dilate(gray, np.ones((7,7), np.uint8))
-bg = cv2.medianBlur(dilated, 21)
-shadow_removed = 255 - cv2.absdiff(gray, bg)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-# ---------- CLAHE ----------
-clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-contrast = clahe.apply(shadow_removed)
+    _, thresh = cv2.threshold(
+        gray, 0, 255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
 
-# ---------- Denoise ----------
-blur = cv2.GaussianBlur(contrast, (5,5), 0)
+    os.makedirs("processed", exist_ok=True)
 
-# ---------- Threshold ----------
-binary = cv2.adaptiveThreshold(
-    blur,255,
-    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-    cv2.THRESH_BINARY,
-    15,10
-)
+    output_path = os.path.join(
+        "processed",
+        os.path.basename(image_path)
+    )
 
-# ---------- Morphology ----------
-kernel = np.ones((2,2), np.uint8)
-clean = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel)
+    cv2.imwrite(output_path, thresh)
 
-# ---------- Quality Score ----------
-lap = cv2.Laplacian(gray, cv2.CV_64F).var()
-
-if lap > 150:
-    quality = "Excellent"
-elif lap > 80:
-    quality = "Good"
-elif lap > 40:
-    quality = "Average"
-else:
-    quality = "Poor"
-
-os.makedirs("processed", exist_ok=True)
-cv2.imwrite(OUTPUT_PATH, clean)
-
-print("\n========== PREPROCESS REPORT ==========")
-print("Saved :", OUTPUT_PATH)
-print(f"Sharpness Score : {lap:.2f}")
-print("Quality :", quality)
-print("======================================")
+    return output_path

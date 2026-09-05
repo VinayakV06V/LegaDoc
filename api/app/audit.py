@@ -64,13 +64,16 @@ def write_audit_log(
     if db.bind.dialect.name == "postgresql":
         db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _AUDIT_LOCK_KEY})
 
-    prev = db.query(models.AuditLog).order_by(models.AuditLog.created_at.desc()).first()
+    # Ordered by seq, not created_at — see models.AuditLog.seq's docstring.
+    # Wall-clock time can tie between two writes microseconds apart (this is
+    # not hypothetical: several writes in the same request landed with an
+    # identical created_at and silently broke the chain — see git history /
+    # PR #20 review). seq is a plain monotonic counter, safe under the same
+    # advisory lock that already serializes writers.
+    prev = db.query(models.AuditLog).order_by(models.AuditLog.seq.desc()).first()
     prev_hash = prev.row_hash if prev else None
+    next_seq = (prev.seq if prev else 0) + 1
 
-    # Set in application code, not server_default — guarantees microsecond
-    # precision across both dialects, which is what makes created_at a safe
-    # ordering key for the chain (SQLite's CURRENT_TIMESTAMP default is only
-    # 1-second resolution, which is not fine enough to order fast writes).
     created_at = datetime.now(timezone.utc)
     content = _row_content(case_id, actor_user_id, action, target_type, target_id, metadata, created_at)
     row_hash = hashlib.sha256(f"{prev_hash}|{content}".encode("utf-8")).hexdigest()
@@ -84,6 +87,7 @@ def write_audit_log(
         action_metadata=metadata or {},
         prev_hash=prev_hash,
         row_hash=row_hash,
+        seq=next_seq,
         created_at=created_at,
     )
     db.add(entry)
@@ -98,7 +102,7 @@ def verify_chain_intact(db: Session) -> bool:
     moment any row's stored row_hash doesn't match what its content +
     prev_hash actually hash to, which is exactly what "someone tampered
     with or deleted a row" looks like."""
-    rows = db.query(models.AuditLog).order_by(models.AuditLog.created_at.asc()).all()
+    rows = db.query(models.AuditLog).order_by(models.AuditLog.seq.asc()).all()
     prev_hash = None
     for row in rows:
         content = _row_content(row.case_id, row.actor_user_id, row.action, row.target_type, row.target_id, row.action_metadata, row.created_at)
@@ -119,7 +123,7 @@ def verify_case_chain_integrity(db: Session, case_id) -> dict:
       case_id, chain_intact, total_entries, latest_hash
     """
     case_uuid = case_id if isinstance(case_id, UUID) else UUID(str(case_id))
-    rows = db.query(models.AuditLog).order_by(models.AuditLog.created_at.asc()).all()
+    rows = db.query(models.AuditLog).order_by(models.AuditLog.seq.asc()).all()
     prev_hash = None
     chain_intact = True
     case_rows = []

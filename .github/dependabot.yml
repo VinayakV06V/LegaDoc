@@ -4,7 +4,16 @@ updates:
     directory: "/web"
     schedule:
       interval: "weekly"
+    groups:
+      react:
+        patterns:
+          - "react*"
+      vite:
+        patterns:
+          - "vite*"
+          - "@vitejs/*"
   - package-ecosystem: "pip"
     directory: "/api"
     schedule:
       interval: "weekly"
+

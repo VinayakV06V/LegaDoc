@@ -143,6 +143,33 @@ def test_authority_fulfillment_and_double_submit_prevention(client, make_user, m
     assert "already been fulfilled" in re_submit.text
 
 
+def test_unauthorized_roles_cannot_fulfill_evidence_request(client, make_user, make_org):
+    """Asserts that roles outside matching authority_staff/admin (e.g. defense) are rejected with 403."""
+    case, io_user, io_token = _register_and_assign_case(client, make_user)
+    fsl_org = make_org(name="Digital Forensics Lab", org_type="fsl")
+
+    ev_resp = client.post(
+        f"/cases/{case['id']}/evidence-requests",
+        json={"requested_org_id": str(fsl_org.id), "doc_type_expected": "FSL Report"},
+        headers=auth_headers(io_token),
+    ).json()
+    req_id = ev_resp["id"]
+
+    # Defense intruder attempting to submit fake forensic report
+    defense_user = make_user("defense", email="defense@evil.com", password="pw")
+    defense_token = login(client, "defense@evil.com", "pw").json()["access_token"]
+
+    fake_pdf = b"%PDF-1.4 fabricated defense analysis"
+    intruder_resp = client.post(
+        f"/evidence-requests/{req_id}/submit",
+        files={"file": ("report.pdf", io.BytesIO(fake_pdf), "application/pdf")},
+        headers=auth_headers(defense_token),
+    )
+    assert intruder_resp.status_code == 403
+    assert "Role not permitted" in intruder_resp.json()["detail"]
+
+
+
 def test_charge_sheet_and_join_gate(client, make_user, make_org, db_session):
     case, io_user, io_token = _register_and_assign_case(client, make_user, crime_type="Financial Fraud")
     prosecutor = make_user("prosecutor", email="prosecutor@court.gov.in", password="pw")

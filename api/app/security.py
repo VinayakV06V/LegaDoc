@@ -224,4 +224,9 @@ def verify_evidence_request_org_access(
             )
         return req
 
-    return req
+    # Default-deny: only the target authority organization (or oversight roles) can fulfill/touch evidence requests
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Role not permitted to fulfill or access external evidence requests",
+    )
+

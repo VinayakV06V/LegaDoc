@@ -17,11 +17,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from celery import Celery
 
-from app.config import settings
-from app.preprocess import preprocess_image
-from app.ocr import run_ocr
-from app.parser import parse_fir
-from app.semantic import semantic_parse
+from ocr_engine.config import settings
+from uuid import UUID
+
+from ocr_engine import models
+from ocr_engine.database import SessionLocal
+from ocr_engine.storage import get_storage
+from ocr_engine.preprocess import preprocess_image
+from ocr_engine.ocr import run_ocr
+from ocr_engine.parser import parse_fir
+from ocr_engine.semantic import semantic_parse
 
 # Uncomment as you need them:
 # from uuid import UUID
@@ -39,21 +44,35 @@ app = Celery(
 
 
 @app.task(name="ocr_worker.extract_document", bind=True, max_retries=5)
-def extract_document(self, image_path: str):
-    """
-    OCR Worker for FIR document extraction
-    """
+def extract_document(self, document_id: str):
 
-    # Step 1: Preprocess
-    processed_path = preprocess_image(image_path)
+    db = SessionLocal()
 
-    # Step 2: OCR
-    ocr_result = run_ocr(processed_path)
+    try:
+        # 1. Get document from database
+        document = db.get(models.Document, UUID(document_id))
 
-    # Step 3: Parse FIR
-    parsed_data = parse_fir(ocr_result)
+        if document is None:
+            raise Exception("Document not found")
 
-    # Step 4: Semantic output
-    result = semantic_parse(parsed_data)
+        # 2. Load uploaded image
+        storage = get_storage()
+        image_path = storage.get(document.storage_path)
 
-    return result
+        # 3. Preprocess
+        processed_path = preprocess_image(image_path)
+
+        # 4. OCR
+        ocr_result = run_ocr(processed_path)
+
+        # Convert OCR list into plain text
+        raw_text = "\n".join([x["text"] for x in ocr_result])
+
+        # 5. Save OCR text
+        document.raw_text = raw_text
+        db.commit()
+
+        return {"status": "success"}
+
+    finally:
+        db.close()

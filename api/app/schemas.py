@@ -199,3 +199,64 @@ class AdminAuditLogEntry(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+# ---------- Evidence Requests (Flow 3) ----------
+class CreateEvidenceRequest(BaseModel):
+    requested_org_id: UUID
+    doc_type_expected: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class EvidenceRequestResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    requested_org_id: UUID
+    doc_type_expected: Optional[str] = None
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Bail Track (Flow 4) ----------
+class BailOrderRequest(BaseModel):
+    granted: bool
+    conditions: Optional[str] = None
+
+
+class BailSuretyRequest(BaseModel):
+    surety_name: str
+    bond_amount: float
+
+
+class BailRecordResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    stage: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------- Trial & Judgment (Flow 5) ----------
+class JudgmentRequest(BaseModel):
+    verdict: str  # "acquitted" | "convicted"
+    summary: Optional[str] = None
+
+
+# ---------- Case Diary ----------
+class CaseDiaryCreate(BaseModel):
+    text: str
+
+
+class CaseDiaryResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    author_user_id: UUID
+    text: str
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+

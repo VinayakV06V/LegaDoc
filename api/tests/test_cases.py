@@ -167,3 +167,94 @@ def test_police_specialist_can_read_assigned_case(client, make_user):
 
     assert resp.status_code == 200
     assert resp.json()["id"] == case["id"]
+
+
+def test_assigned_io_can_add_and_list_case_diary_entries(client, make_user):
+    duty = make_user("duty_officer", email="duty_cd@example.com", password="pw")
+    sho = make_user("sho", email="sho_cd@example.com", password="pw", org=duty.organization)
+    io = make_user("io", email="io_cd@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty_cd@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho_token = login(client, "sho_cd@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    io_token = login(client, "io_cd@example.com", "pw").json()["access_token"]
+
+    # IO adds diary entry
+    cd_resp = client.post(
+        f"/cases/{case['id']}/case-diary",
+        json={"text": "Visited scene of crime at 10:30 AM. Recovered suspicious tool."},
+        headers=auth_headers(io_token),
+    )
+    assert cd_resp.status_code == 201
+    entry = cd_resp.json()
+    assert entry["case_id"] == case["id"]
+    assert entry["status"] == "ready"
+    assert "Visited scene" in entry["text"]
+
+    # IO lists diary entries
+    list_resp = client.get(f"/cases/{case['id']}/case-diary", headers=auth_headers(io_token))
+    assert list_resp.status_code == 200
+    assert len(list_resp.json()) == 1
+
+
+def test_unassigned_io_cannot_add_or_list_case_diary(client, make_user):
+    duty = make_user("duty_officer", email="duty_cd2@example.com", password="pw")
+    io_assigned = make_user("io", email="io_assigned@example.com", password="pw", org=duty.organization)
+    io_unassigned = make_user("io", email="io_unassigned@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty_cd2@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho = make_user("sho", email="sho_cd2@example.com", password="pw", org=duty.organization)
+    sho_token = login(client, "sho_cd2@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io_assigned.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    unassigned_token = login(client, "io_unassigned@example.com", "pw").json()["access_token"]
+
+    # Cannot add entry
+    add_fail = client.post(
+        f"/cases/{case['id']}/case-diary",
+        json={"text": "Unauthorized note"},
+        headers=auth_headers(unassigned_token),
+    )
+    assert add_fail.status_code == 403
+
+    # Cannot list entries
+    list_fail = client.get(f"/cases/{case['id']}/case-diary", headers=auth_headers(unassigned_token))
+    assert list_fail.status_code == 403
+
+
+def test_empty_case_diary_entry_rejected(client, make_user):
+    duty = make_user("duty_officer", email="duty_cd3@example.com", password="pw")
+    io = make_user("io", email="io_cd3@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty_cd3@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho = make_user("sho", email="sho_cd3@example.com", password="pw", org=duty.organization)
+    sho_token = login(client, "sho_cd3@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    io_token = login(client, "io_cd3@example.com", "pw").json()["access_token"]
+
+    bad_resp = client.post(
+        f"/cases/{case['id']}/case-diary",
+        json={"text": "   "},
+        headers=auth_headers(io_token),
+    )
+    assert bad_resp.status_code == 400

@@ -313,3 +313,98 @@ def test_chain_integrity_forbidden_for_non_admin(client, db_session, make_org, m
         headers=auth_headers(tokens["assigned_io"]),
     )
     assert resp.status_code == 403
+
+
+def test_audit_log_empty_case_returns_clean_response(client, db_session, make_org, make_user):
+    """A case with zero audit log rows must return valid responses without crashing."""
+    police_org = make_org("North Station", "police")
+    admin = make_user("config_admin", email="admin_empty@police.gov", org=police_org)
+    io_user = make_user("io", email="io_empty@police.gov", org=police_org)
+    admin_token = security.create_access_token(str(admin.id), str(police_org.id), "config_admin")
+    io_token = security.create_access_token(str(io_user.id), str(police_org.id), "io")
+
+    empty_case = models.Case(
+        case_number="FIR-2026-EMPTY",
+        crime_type="theft",
+        investigation_status="FIR_Registered",
+    )
+    db_session.add(empty_case)
+    db_session.commit()
+    db_session.refresh(empty_case)
+
+    # Assign IO so case access succeeds
+    db_session.add(models.CaseAssignment(case_id=empty_case.id, io_user_id=io_user.id))
+    db_session.commit()
+
+    # Admin (Full view)
+    r_admin = client.get(f"/cases/{empty_case.id}/audit-log", headers=auth_headers(admin_token))
+    assert r_admin.status_code == 200
+    d_admin = r_admin.json()
+    assert d_admin["total_entries"] == 0
+    assert d_admin["entries"] == []
+    assert d_admin["chain_intact"] is True
+
+    # IO (Summary view)
+    r_io = client.get(f"/cases/{empty_case.id}/audit-log", headers=auth_headers(io_token))
+    assert r_io.status_code == 200
+    d_io = r_io.json()
+    assert d_io["total_entries"] == 0
+    assert d_io["action_counts"] == {}
+    assert d_io["first_entry_at"] is None
+    assert d_io["chain_intact"] is True
+
+
+def test_audit_log_malformed_case_id_returns_404(client, db_session, make_org, make_user):
+    _, tokens, _ = _setup_case_with_audit_trail(db_session, make_org, make_user)
+    # Non-UUID string must return 404, not 500
+    resp = client.get("/cases/not-a-valid-uuid/audit-log", headers=auth_headers(tokens["config_admin"]))
+    assert resp.status_code == 404
+    assert "Case not found" in resp.json()["detail"]
+
+    resp_ai = client.get("/cases/not-a-valid-uuid/audit-log/ai-parser", headers=auth_headers(tokens["security_auditor"]))
+    assert resp_ai.status_code == 404
+
+    resp_chain = client.get("/cases/not-a-valid-uuid/audit-log/chain-integrity", headers=auth_headers(tokens["config_admin"]))
+    assert resp_chain.status_code == 404
+
+
+def test_audit_log_query_filters_and_pagination(client, db_session, make_org, make_user):
+    case, tokens, _ = _setup_case_with_audit_trail(db_session, make_org, make_user)
+
+    # Filter by action=auto_tag_completed
+    resp = client.get(
+        f"/cases/{case.id}/audit-log?action=auto_tag_completed",
+        headers=auth_headers(tokens["config_admin"]),
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_entries"] == 2
+    assert all(e["action"] == "auto_tag_completed" for e in data["entries"])
+
+    # Pagination: limit=1, offset=1
+    paged = client.get(
+        f"/cases/{case.id}/audit-log?limit=1&offset=1",
+        headers=auth_headers(tokens["config_admin"]),
+    )
+    assert paged.status_code == 200
+    assert len(paged.json()["entries"]) == 1
+    assert paged.json()["total_entries"] == 5
+
+
+def test_chain_integrity_detects_row_deletion(client, db_session, make_org, make_user):
+    """Deleting any row in the middle must break the cryptographic hash chain."""
+    case, tokens, _ = _setup_case_with_audit_trail(db_session, make_org, make_user)
+    rows = db_session.query(models.AuditLog).order_by(models.AuditLog.created_at.asc()).all()
+    assert len(rows) >= 3
+
+    # Delete the second row
+    db_session.delete(rows[1])
+    db_session.commit()
+
+    resp = client.get(
+        f"/cases/{case.id}/audit-log/chain-integrity",
+        headers=auth_headers(tokens["config_admin"]),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["chain_intact"] is False
+

@@ -2,6 +2,7 @@
 
 > **Repository:** [LegaDoc](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc)  
 > **Standard:** Complete Data Flow Diagram set spanning Level 0 (Context), Level 1 (Macro Subsystems), and Level 2 (Micro Decompositions for all 7 submodules).  
+> **Layout Architecture:** Optimized for vertical clarity and high readability across IDE preview panes, GitHub, and PDF exports. Prevents horizontal squishing and eliminates microscopic text.  
 > **Validation:** Standard Mermaid flowchart syntax without bidirectional link errors, unquoted delimiters, stateDiagram-v2 parse bugs, or recursive loops.
 
 ---
@@ -10,51 +11,76 @@
 
 ```mermaid
 flowchart TB
-    %% External Entities (Users)
-    POLICE["👤 Police Personnel<br/>(Duty Officer / SHO / IO)"]
-    AUTH["🏛️ External Authorities<br/>(FSL Forensics / Hospital / Bank / Telecom)"]
-    COURT["⚖️ Judiciary & Prosecution<br/>(Judge / Magistrate / Public Prosecutor)"]
-    DEFENSE["🛡️ Defense & Accused<br/>(Defense Counsel / Accused)"]
-    AUDITOR["🔍 Security Auditor<br/>(Independent Redaction Oversight)"]
-    ANALYST["📊 NCRB / Crime Analyst<br/>(National Crime Records Bureau)"]
+    %% ==========================================
+    %% TOP TIER: STAKEHOLDERS (VERTICAL STACK)
+    %% ==========================================
+    subgraph STAKEHOLDERS ["👥 Justice System Stakeholders"]
+        direction TB
+        subgraph G_POLICE ["Law Enforcement & Public Authorities"]
+            direction LR
+            POLICE["👤 Police Personnel<br/>(Duty Officer / SHO / IO)"]
+            AUTH["🏛️ External Authorities<br/>(FSL / Hospitals / Banks)"]
+        end
+        subgraph G_COURT ["Judiciary & Legal Defense"]
+            direction LR
+            COURT["⚖️ Judiciary & Prosecution<br/>(Judge / Public Prosecutor)"]
+            DEFENSE["🛡️ Defense & Accused<br/>(Defense Counsel / Accused)"]
+        end
+        subgraph G_GOV ["Independent Oversight & Analytics"]
+            direction LR
+            AUDITOR["🔍 Security Auditor<br/>(Redaction & Decision Oversight)"]
+            ANALYST["📊 NCRB / Crime Analyst<br/>(National Crime Records Bureau)"]
+        end
+        G_POLICE ~~~ G_COURT ~~~ G_GOV
+    end
 
-    %% External Systems
-    FABRIC["⛓️ Hyperledger Fabric<br/>(Permissioned Blockchain Ledger)"]
+    %% ==========================================
+    %% CORE SYSTEM
+    %% ==========================================
+    LEGADOC(["0.0 LEGADOC CRIMINAL JUSTICE OS<br/>(FastAPI Monolith, Security Gateways & Celery Workers)"])
 
-    %% Central Process
-    LEGADOC(["0.0 LEGADOC CRIMINAL JUSTICE OS<br/>(FastAPI Monolith, Ingestion & Lifecycle Workers)"])
+    %% ==========================================
+    %% BOTTOM TIER: STORAGE & RAILS (VERTICAL STACK)
+    %% ==========================================
+    subgraph INFRA ["💾 Storage, Blockchain & Messaging Substrate"]
+        direction TB
+        subgraph G_PERSIST ["Relational Core & Encrypted Blobs"]
+            direction LR
+            DB[("💾 PostgreSQL 16 Multi-Tenant Core<br/>(Cases, Documents, Tags, Monotonic AuditLog)")]
+            STORAGE[("💾 MinIO S3 Object Storage<br/>(AES-256 Server-Side Encrypted Blobs)")]
+        end
+        subgraph G_ASYNC ["Distributed Ledger & Task Queue"]
+            direction LR
+            REDIS[("💾 Redis 7 Persistent Broker<br/>(Celery Queues & Sliding Rate Limiter)")]
+            FABRIC[("⛓️ Hyperledger Fabric<br/>(Immutable SHA-256 Proof of Existence)")]
+        end
+        G_PERSIST ~~~ G_ASYNC
+    end
 
-    %% Data Stores
-    STORAGE[("💾 MinIO Object Storage<br/>org_id/case_id/doc_id/v{version}")]
-    DB[("💾 PostgreSQL 16 Multi-Tenant Core<br/>(Cases, Documents, Tags, AuditLog)")]
-    REDIS[("💾 Redis 7 AOF Persistent<br/>(Celery Broker, Rate Limiter Cache)")]
+    %% Stakeholder Inbound / Outbound
+    POLICE -->|fir dockets, evidence, case diary| LEGADOC
+    AUTH -->|section 91 certified reports| LEGADOC
+    COURT -->|hearing notices, bail orders, judgments| LEGADOC
+    DEFENSE -->|bail applications, surety bonds| LEGADOC
+    AUDITOR -->|ai parser audit inspection| LEGADOC
+    ANALYST -->|crime metadata queries| LEGADOC
 
-    %% User Ingestion & Responses
-    POLICE -->|credentials, fir dockets, evidence, case diary| LEGADOC
-    AUTH -->|credentials and section 91 evidence reports| LEGADOC
-    COURT -->|credentials, hearing notices, bail orders, judgments| LEGADOC
-    DEFENSE -->|credentials, bail applications, surety bonds| LEGADOC
-    AUDITOR -->|credentials and ai parser audit queries| LEGADOC
-    ANALYST -->|credentials and metadata report filters| LEGADOC
-
-    LEGADOC -->|case docket, assigned cases, review queues| POLICE
+    LEGADOC -->|case docket and review queues| POLICE
     LEGADOC -->|routed evidence requisitions| AUTH
-    LEGADOC -->|unredacted judicial evidence, charge sheets| COURT
+    LEGADOC -->|unredacted judicial evidence| COURT
     LEGADOC -->|bail status and hearing schedules| DEFENSE
-    LEGADOC -->|decision metrics, confidence scores, zero pii| AUDITOR
-    LEGADOC -->|deidentified crime metadata analytics| ANALYST
+    LEGADOC -->|confidence scores, zero pii| AUDITOR
+    LEGADOC -->|deidentified crime metadata| ANALYST
 
-    %% System Integrations
-    LEGADOC -->|signed sha256 hash transactions| FABRIC
-    FABRIC -->|block confirmation and transaction id| LEGADOC
-
-    %% Data Storage
+    %% Infrastructure Links
     LEGADOC -->|write encrypted blobs and presigned urls| STORAGE
     STORAGE -->|read binary streams| LEGADOC
-    LEGADOC -->|sql transactions, rls scoping, seq audit chain| DB
+    LEGADOC -->|sql rls and seq hash chaining| DB
     DB -->|relational records and row verification| LEGADOC
     LEGADOC -->|enqueue async jobs and check rate limits| REDIS
     REDIS -->|dequeue jobs to celery workers| LEGADOC
+    LEGADOC -->|signed sha256 hash transactions| FABRIC
+    FABRIC -->|block confirmation and transaction id| LEGADOC
 ```
 
 ---
@@ -63,99 +89,126 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    UserPolice["👤 Duty Officer / SHO / IO"]
-    UserAuth["🏛️ External Authority"]
-    UserJudiciary["⚖️ Court / Prosecutor"]
-    UserDefense["🛡️ Defense Counsel"]
-    UserAuditor["🔍 Security Auditor / NCRB"]
-    FabricLedger["⛓️ Hyperledger Fabric"]
+    %% ==========================================
+    %% TOP ACTORS
+    %% ==========================================
+    subgraph USERS ["👥 Primary Stakeholders"]
+        direction LR
+        PoliceStaff["👤 Police (Duty Officer / SHO / IO)"]
+        JudicialStaff["⚖️ Court & Prosecution"]
+        AuditorStaff["🔍 Security Auditor & NCRB"]
+    end
 
-    P_AUTH(["1.0 /auth & /admin/roles<br/>Session, Identity & Multi-Tenant RBAC"])
-    P_CASES(["2.0 /cases & Reassign<br/>FIR Registration, Assignment & Case Diary"])
-    P_INGEST(["3.0 /documents (Upload)<br/>Streaming Sniffer, MinIO & Celery Dispatch"])
-    P_WORKER(["4.0 Workers & Review Queue<br/>OCR, AI Tagging, Redaction & Needs Review"])
-    P_EVID(["5.0 /evidence-requests & Gate<br/>Sec 91 Requisitions & Charge Sheet Gate"])
-    P_BAIL_TRIAL(["6.0 /bail & /trial<br/>Independent Bail FSM & Judicial Trial"])
-    P_AUDIT_NCRB(["7.0 /audit-log & /reports<br/>Sequential Audit Chaining & NCRB Reporting"])
+    %% ==========================================
+    %% STAGE 1: IDENTITY & CASE INTAKE
+    %% ==========================================
+    subgraph STAGE1 ["Stage 1: Identity, Tenancy & Case Registration"]
+        direction TB
+        subgraph S1_PROCS ["Processes"]
+            direction TB
+            P_AUTH(["1.0 /auth & /admin/roles<br/>Constant-Time Dummy Bcrypt & 18 Canonical Roles"])
+            P_CASES(["2.0 /cases & Handover<br/>FIR Registration, Section 172 Diary & IO Reassignment"])
+        end
+        subgraph S1_DATA ["Data Stores"]
+            direction TB
+            D_USERS[("💾 D1: users & roles<br/>users, orgs, permissions")]
+            D_CASES[("💾 D2: cases & assignments<br/>cases, assignments, diary")]
+        end
+    end
 
-    D_USERS[("💾 D1: users & orgs<br/>users, organizations, roles, permissions")]
-    D_CASES[("💾 D2: cases & assignments<br/>cases, case_assignments, case_diary_entries")]
-    D_DOCS[("💾 D3: documents<br/>documents, versions, raw_text, storage_path")]
-    D_TAGS[("💾 D4: sensitivity_tags<br/>document_sensitivity_tags, zero pii text")]
-    D_EVID[("💾 D5: evidence_requests<br/>evidence_requests, stage_requirements")]
-    D_S3[("💾 D6: MinIO S3<br/>org_id/case_id/doc_id/v{version}")]
-    D_REDIS[("💾 D7: Redis Queues<br/>Celery broker, sliding rate limits")]
-    D_AUDIT[("💾 D8: audit_logs<br/>pg_advisory_xact_lock, monotonic seq, row_hash")]
+    %% ==========================================
+    %% STAGE 2: INGESTION & PROCESSING
+    %% ==========================================
+    subgraph STAGE2 ["Stage 2: Document Ingestion, OCR & Redaction Spine"]
+        direction TB
+        subgraph S2_PROCS ["Processes"]
+            direction TB
+            P_INGEST(["3.0 /documents (Upload)<br/>Streaming Sniffer, MinIO AES-256 & Celery Dispatch"])
+            P_WORKER(["4.0 Workers & Review Queue<br/>PaddleOCR, Presidio Tags & Dynamic Role Redaction"])
+        end
+        subgraph S2_DATA ["Data Stores"]
+            direction TB
+            D_S3[("💾 D6: MinIO S3<br/>AES-256 Encrypted Blobs")]
+            D_DOCS[("💾 D3: documents<br/>status, chain, raw_text")]
+            D_TAGS[("💾 D4: sensitivity_tags<br/>zero PII span coordinates")]
+            D_REDIS[("💾 D7: Redis Queues<br/>Celery broker & limiter")]
+        end
+    end
 
-    %% Auth interactions
-    UserPolice -->|login credentials| P_AUTH
-    UserAuth -->|login credentials| P_AUTH
-    UserJudiciary -->|login credentials| P_AUTH
-    UserDefense -->|login credentials| P_AUTH
-    UserAuditor -->|login credentials| P_AUTH
-    P_AUTH -->|validate_credentials_and_constant_time_dummy| D_USERS
-    D_USERS -->|user_record_and_canonical_role| P_AUTH
-    P_AUTH -->|jwt_access_and_refresh_tokens| UserPolice
+    %% ==========================================
+    %% STAGE 3: EVIDENCE REQUISITION & COURT
+    %% ==========================================
+    subgraph STAGE3 ["Stage 3: Evidence Requisitions & Court Lifecycle"]
+        direction TB
+        subgraph S3_PROCS ["Processes"]
+            direction TB
+            P_EVID(["5.0 /evidence-requests & Gate<br/>Sec 91 Multi-Tenant Requisitions & Sec 173 Gate"])
+            P_BAIL_TRIAL(["6.0 /bail & /trial<br/>Independent 5-State Bail FSM & Judicial Trial"])
+        end
+        subgraph S3_DATA ["Data Stores"]
+            direction TB
+            D_EVID[("💾 D5: evidence_requests<br/>requests, checklist requirements")]
+        end
+    end
 
-    %% Cases interactions
-    UserPolice -->|register_fir_payload| P_CASES
-    P_CASES -->|insert_case_and_status_fir_registered| D_CASES
-    UserPolice -->|assign_or_reassign_io| P_CASES
-    P_CASES -->|atomic_swap_case_assignments| D_CASES
-    P_CASES -->|append_case_diary_entry| D_CASES
-    P_CASES -->|emit_audit_event_io_assigned| D_AUDIT
+    %% ==========================================
+    %% STAGE 4: AUDIT & CRIME REPORTING
+    %% ==========================================
+    subgraph STAGE4 ["Stage 4: Tamper-Evident Audit & Analytics"]
+        direction TB
+        subgraph S4_PROCS ["Processes"]
+            direction TB
+            P_AUDIT_NCRB(["7.0 /audit-log & /reports<br/>Monotonic Seq Hash Chaining & NCRB De-Identified Analytics"])
+        end
+        subgraph S4_DATA ["Data Stores"]
+            direction TB
+            D_AUDIT[("💾 D8: audit_logs<br/>pg_advisory_lock, seq, row_hash")]
+            FabricLedger[("⛓️ Hyperledger Fabric<br/>Immutable SHA-256 Anchor")]
+        end
+    end
 
-    %% Ingestion interactions
-    UserPolice -->|multipart_document_upload| P_INGEST
-    P_INGEST -->|sniff_8kb_magic_bytes_and_50mb_cap| P_INGEST
-    P_INGEST -->|stream_encrypted_file_blob| D_S3
-    P_INGEST -->|insert_document_processing| D_DOCS
-    P_INGEST -->|enqueue_track_a_and_track_b| D_REDIS
+    %% ==========================================
+    %% STAGE-BY-STAGE PIPELINE FLOW
+    %% ==========================================
+    USERS --> P_AUTH
+    P_AUTH -->|verify_credentials| D_USERS
+    D_USERS -->|active_role_and_jwt| P_AUTH
+    P_AUTH --> P_CASES
 
-    %% Worker & Review interactions
-    D_REDIS -->|dequeue_ocr_and_ai_jobs| P_WORKER
-    P_WORKER -->|read_raw_file| D_S3
-    P_WORKER -->|update_raw_text| D_DOCS
-    P_WORKER -->|insert_presidio_sensitivity_tags| D_TAGS
-    P_WORKER -->|submit_hash_transaction| FabricLedger
-    FabricLedger -->|transaction_id_and_confirmed| P_WORKER
-    P_WORKER -->|update_chain_status_confirmed| D_DOCS
-    P_WORKER -->|flag_needs_review_if_confidence_low| D_DOCS
-    P_WORKER -->|emit_auto_tag_completed| D_AUDIT
-    UserPolice -->|review_queue_and_human_correction| P_WORKER
-    P_WORKER -->|apply_redaction_masks_by_role| UserJudiciary
+    PoliceStaff -->|fir_payload_and_reassign| P_CASES
+    P_CASES -->|create_case_and_swap_assignment| D_CASES
+    P_CASES --> P_INGEST
 
-    %% Evidence & Charge sheet
-    UserPolice -->|create_section_91_request| P_EVID
-    P_EVID -->|insert_evidence_request| D_EVID
-    UserAuth -->|submit_certified_evidence| P_EVID
-    P_EVID -->|verify_tenant_match_and_default_deny| D_EVID
-    P_EVID -->|mark_request_completed_and_attach_doc| D_EVID
-    UserJudiciary -->|file_charge_sheet_attempt| P_EVID
-    D_EVID -->|check_mandatory_documents_and_evidence| P_EVID
-    P_EVID -->|update_status_charge_sheet_filed| D_CASES
-    P_EVID -->|emit_charge_sheet_filed_event| D_AUDIT
+    PoliceStaff -->|multipart_file_upload| P_INGEST
+    P_INGEST -->|stream_encrypted_blob| D_S3
+    P_INGEST -->|insert_doc_record| D_DOCS
+    P_INGEST -->|enqueue_track_a_and_b| D_REDIS
+    D_REDIS -->|dequeue_job| P_WORKER
 
-    %% Bail & Trial
-    UserPolice -->|record_arrest| P_BAIL_TRIAL
-    UserDefense -->|submit_bail_petition| P_BAIL_TRIAL
-    UserJudiciary -->|schedule_hearing_and_issue_order| P_BAIL_TRIAL
-    P_BAIL_TRIAL -->|update_bail_fsm_state| D_CASES
-    UserJudiciary -->|schedule_trial_hearing| P_BAIL_TRIAL
-    P_BAIL_TRIAL -->|update_investigation_status_trial| D_CASES
-    UserJudiciary -->|pronounce_judgment_verdict| P_BAIL_TRIAL
-    P_BAIL_TRIAL -->|update_status_judgment_terminal| D_CASES
-    P_BAIL_TRIAL -->|emit_fsm_and_judgment_audit| D_AUDIT
+    P_WORKER -->|read_blob| D_S3
+    P_WORKER -->|update_ocr_text| D_DOCS
+    P_WORKER -->|store_detected_spans| D_TAGS
+    P_WORKER -->|needs_review_queue| PoliceStaff
+    P_WORKER -->|role_filtered_document| JudicialStaff
+    P_WORKER --> P_EVID
 
-    %% Audit & NCRB
-    UserAuditor -->|inspect_ai_parser_decisions| P_AUDIT_NCRB
-    D_REDIS -->|check_sliding_window_20_per_min| P_AUDIT_NCRB
-    P_AUDIT_NCRB -->|write_on_read_meta_audit_row| D_AUDIT
-    P_AUDIT_NCRB -->|verify_monotonic_seq_hash_chain| D_AUDIT
-    D_AUDIT -->|clean_chain_integrity_status| P_AUDIT_NCRB
-    UserAuditor -->|get_deidentified_crime_metadata| P_AUDIT_NCRB
-    D_CASES -->|project_non_pii_columns_only| P_AUDIT_NCRB
-    P_AUDIT_NCRB -->|anonymized_statistical_records| UserAuditor
+    PoliceStaff -->|create_sec_91_request| P_EVID
+    P_EVID -->|insert_requisition| D_EVID
+    P_EVID -->|evaluate_sec_173_and_join_gate| D_CASES
+    P_EVID --> P_BAIL_TRIAL
+
+    PoliceStaff -->|record_arrest| P_BAIL_TRIAL
+    JudicialStaff -->|bail_order_and_trial_hearing| P_BAIL_TRIAL
+    JudicialStaff -->|verdict_judgment_terminal| P_BAIL_TRIAL
+    P_BAIL_TRIAL -->|update_fsm_and_disposition| D_CASES
+    P_BAIL_TRIAL --> P_AUDIT_NCRB
+
+    AuditorStaff -->|inspect_ai_decisions_20_per_min| P_AUDIT_NCRB
+    AuditorStaff -->|ncrb_deidentified_crime_metadata| P_AUDIT_NCRB
+    P_AUDIT_NCRB -->|read_non_pii_columns| D_CASES
+    P_AUDIT_NCRB -->|verify_seq_ordered_hash_chain| D_AUDIT
+    P_WORKER -->|anchor_doc_hash| FabricLedger
+    FabricLedger -->|block_receipt_tx_id| P_WORKER
 ```
 
 ---
@@ -172,16 +225,25 @@ flowchart TB
     ClientUser["👤 User (Any Role)"]
     AdminUser["👤 Config Admin"]
 
-    P_LOGIN(["2.1.1 POST /auth/login<br/>Constant-time dummy bcrypt check"])
-    P_REFRESH(["2.1.2 POST /auth/refresh<br/>Exchange refresh token for access token"])
-    P_ME(["2.1.3 GET /auth/me<br/>Authoritative identity and permission profile"])
-    P_ROLE_MANAGE(["2.1.4 GET/POST /admin/roles<br/>Role definitions and custom role provisioning"])
-    P_ROLE_ASSIGN(["2.1.5 POST /admin/users/:id/role<br/>Assign role to government officer"])
+    subgraph AUTH_PIPELINE ["Authentication & Session Lifecycle"]
+        direction TB
+        P_LOGIN(["2.1.1 POST /auth/login<br/>Constant-time dummy bcrypt check"])
+        P_REFRESH(["2.1.2 POST /auth/refresh<br/>Exchange refresh token for access token"])
+        P_ME(["2.1.3 GET /auth/me<br/>Authoritative identity and permission profile"])
+    end
 
-    T_USERS[("users<br/>email, hashed_password, role, org_id")]
-    T_ROLES[("roles & role_permissions<br/>code, name, is_system, permissions")]
-    T_ORGS[("organizations<br/>id, name, org_type")]
-    T_AUDIT[("audit_logs<br/>seq, action, actor_user_id, row_hash")]
+    subgraph ROLE_GOV ["Role Governance & Provisioning"]
+        direction TB
+        P_ROLE_MANAGE(["2.1.4 GET/POST /admin/roles<br/>Role definitions and custom role provisioning"])
+        P_ROLE_ASSIGN(["2.1.5 POST /admin/users/:id/role<br/>Assign role to government officer"])
+    end
+
+    subgraph AUTH_STORES ["Data Stores"]
+        direction TB
+        T_USERS[("users<br/>email, hashed_password, role, org_id")]
+        T_ROLES[("roles & role_permissions<br/>code, name, is_system, permissions")]
+        T_AUDIT[("audit_logs<br/>seq, action, actor_user_id, row_hash")]
+    end
 
     ClientUser -->|login_credentials| P_LOGIN
     P_LOGIN -->|query_user_by_email| T_USERS
@@ -220,17 +282,26 @@ flowchart TB
     IO["👤 Investigating Officer (IO)"]
     RestrictedUser["👤 Unassigned IO / Specialist"]
 
-    P_REGISTER(["2.2.1 POST /cases<br/>Register FIR and initiate docket"])
-    P_ASSIGN(["2.2.2 POST /cases/:id/assign-io<br/>Initial IO assignment"])
-    P_REASSIGN(["2.2.3 POST /cases/:id/reassign-io<br/>Mid-case IO handover and atomic swap"])
-    P_DIARY_ADD(["2.2.4 POST /cases/:id/case-diary<br/>Append Section 172 diary note"])
-    P_DIARY_LIST(["2.2.5 GET /cases/:id/case-diary<br/>Read investigation diary timeline"])
-    P_CASE_GET(["2.2.6 GET /cases/:id<br/>Case summary and linked resource docket"])
+    subgraph INTAKE_FLOW ["Case Initiation & Handover"]
+        direction TB
+        P_REGISTER(["2.2.1 POST /cases<br/>Register FIR and initiate docket"])
+        P_ASSIGN(["2.2.2 POST /cases/:id/assign-io<br/>Initial IO assignment"])
+        P_REASSIGN(["2.2.3 POST /cases/:id/reassign-io<br/>Mid-case IO handover and atomic swap"])
+    end
 
-    T_CASES[("cases<br/>id, case_number, crime_type, status")]
-    T_ASSIGN[("case_assignments<br/>case_id, io_user_id, assigned_at")]
-    T_DIARY[("case_diary_entries<br/>id, case_id, author_user_id, entry_text")]
-    T_AUDIT[("audit_logs<br/>action: fir_registered, io_reassigned")]
+    subgraph DIARY_FLOW ["Case Diary & Docket Access"]
+        direction TB
+        P_DIARY_ADD(["2.2.4 POST /cases/:id/case-diary<br/>Append Section 172 diary note"])
+        P_CASE_GET(["2.2.5 GET /cases/:id<br/>Case summary and linked resource docket"])
+    end
+
+    subgraph CASE_STORES ["Data Stores"]
+        direction TB
+        T_CASES[("cases<br/>id, case_number, crime_type, status")]
+        T_ASSIGN[("case_assignments<br/>case_id, io_user_id, assigned_at")]
+        T_DIARY[("case_diary_entries<br/>id, case_id, author_user_id, entry_text")]
+        T_AUDIT[("audit_logs<br/>action: fir_registered, io_reassigned")]
+    end
 
     DutyOfficer -->|fir_registration_payload| P_REGISTER
     P_REGISTER -->|insert_case_record| T_CASES
@@ -270,16 +341,22 @@ flowchart TB
 flowchart TB
     Officer["👤 Permitted Officer / Authority"]
 
-    P_SNIFF(["2.3.1 Stream Sniff & Deduplicate<br/>8KB chunk, native magic bytes, SHA-256"])
-    P_STORAGE_PUT(["2.3.2 Write to Object Storage<br/>MinIO S3 bucket, SSE-S3 AES-256"])
-    P_META_INSERT(["2.3.3 Insert Document Record<br/>status: processing, chain: pending"])
-    P_DISPATCH(["2.3.4 Enqueue Dual Celery Tracks<br/>Track A: Chain Worker, Track B: OCR Worker"])
+    subgraph INGEST_PIPELINE ["Ingestion & Validation Pipeline"]
+        direction TB
+        P_SNIFF(["2.3.1 Stream Sniff & Deduplicate<br/>8KB chunk, native magic bytes, SHA-256"])
+        P_STORAGE_PUT(["2.3.2 Write to Object Storage<br/>MinIO S3 bucket, SSE-S3 AES-256"])
+        P_META_INSERT(["2.3.3 Insert Document Record<br/>status: processing, chain: pending"])
+        P_DISPATCH(["2.3.4 Enqueue Dual Celery Tracks<br/>Track A: Chain Worker, Track B: OCR Worker"])
+    end
 
-    T_CASES[("cases<br/>target case verification")]
-    T_DOCS[("documents<br/>id, case_id, doc_type, version, doc_hash")]
-    D_MINIO[("MinIO S3 Bucket<br/>legadoc-documents/{org}/{case}/{doc}/v{ver}")]
-    D_REDIS_QUEUE[("Redis Celery Queue<br/>ocr_worker, chain_worker")]
-    T_AUDIT[("audit_logs<br/>action: document_uploaded")]
+    subgraph INGEST_STORES ["Data Stores"]
+        direction TB
+        T_CASES[("cases<br/>target case verification")]
+        T_DOCS[("documents<br/>id, case_id, doc_type, version, doc_hash")]
+        D_MINIO[("MinIO S3 Bucket<br/>legadoc-documents/{org}/{case}/{doc}/v{ver}")]
+        D_REDIS_QUEUE[("Redis Celery Queue<br/>ocr_worker, chain_worker")]
+        T_AUDIT[("audit_logs<br/>action: document_uploaded")]
+    end
 
     Officer -->|multipart_file_and_case_id| P_SNIFF
     P_SNIFF -->|verify_caller_case_access| T_CASES
@@ -314,23 +391,27 @@ flowchart TB
     AdminUser["👤 Config Admin"]
     ReaderUser["👤 Reading Role (Specialist / Court)"]
 
-    P_CHAIN_EXEC(["2.4.1 Chain Worker: process_hash_write<br/>Idempotent Fabric anchor & status update"])
-    P_OCR_EXEC(["2.4.2 OCR Worker: extract_document<br/>Fetch S3 blob, run PaddleOCR, store raw_text"])
-    P_AI_EXEC(["2.4.3 AI Parser: tag_document<br/>Presidio NER, tag spans, check 70% threshold"])
-    P_REVIEW_QUEUE(["2.4.4 GET /documents?status=needs_review<br/>Scoped queue, structural PII exclusion"])
-    P_HUMAN_CORRECT(["2.4.5 POST /documents/:id/redact-tag<br/>Officer manual override, extend hash chain"])
-    P_READ_VIEW(["2.4.6 GET /documents/:id<br/>app/redaction.py dynamic span masking"])
+    subgraph WORKER_TRACK ["Worker Execution Track"]
+        direction TB
+        P_OCR_EXEC(["2.4.1 OCR Worker: extract_document<br/>Fetch S3 blob, run PaddleOCR, store raw_text"])
+        P_AI_EXEC(["2.4.2 AI Parser: tag_document<br/>Presidio NER, tag spans, check 70% threshold"])
+        P_CHAIN_EXEC(["2.4.3 Chain Worker: process_hash_write<br/>Idempotent Fabric anchor & status update"])
+    end
 
-    D_MINIO[("MinIO S3 Storage<br/>raw document file")]
-    T_DOCS[("documents<br/>status, chain_status, raw_text")]
-    T_TAGS[("document_sensitivity_tags<br/>entity_type, span_start, span_end, confidence")]
-    T_AUDIT[("audit_logs<br/>auto_tag_completed, redact_tag_correction")]
+    subgraph REVIEW_TRACK ["Review & Redaction Track"]
+        direction TB
+        P_REVIEW_QUEUE(["2.4.4 GET /documents?status=needs_review<br/>Scoped queue, structural PII exclusion"])
+        P_HUMAN_CORRECT(["2.4.5 POST /documents/:id/redact-tag<br/>Officer manual override, extend hash chain"])
+        P_READ_VIEW(["2.4.6 GET /documents/:id<br/>app/redaction.py dynamic span masking"])
+    end
 
-    RedisQueue -->|dequeue chain_worker task| P_CHAIN_EXEC
-    P_CHAIN_EXEC -->|submit_sha256_hash_transaction| FabricNetwork
-    FabricNetwork -->|transaction_confirmed_id| P_CHAIN_EXEC
-    P_CHAIN_EXEC -->|update_chain_status_confirmed| T_DOCS
-    P_CHAIN_EXEC -->|write_audit_log chain_write_confirmed| T_AUDIT
+    subgraph WORKER_STORES ["Data Stores"]
+        direction TB
+        D_MINIO[("MinIO S3 Storage<br/>raw document file")]
+        T_DOCS[("documents<br/>status, chain_status, raw_text")]
+        T_TAGS[("document_sensitivity_tags<br/>entity_type, span_start, span_end, confidence")]
+        T_AUDIT[("audit_logs<br/>auto_tag_completed, redact_tag_correction")]
+    end
 
     RedisQueue -->|dequeue ocr_worker task| P_OCR_EXEC
     P_OCR_EXEC -->|read_raw_bytes| D_MINIO
@@ -343,6 +424,12 @@ flowchart TB
     P_AI_EXEC -->|write_audit_log auto_tag_completed| T_AUDIT
     P_AI_EXEC -->|if_confidence_below_70_set_status_needs_review| T_DOCS
     P_AI_EXEC -->|if_confident_set_status_ready| T_DOCS
+
+    RedisQueue -->|dequeue chain_worker task| P_CHAIN_EXEC
+    P_CHAIN_EXEC -->|submit_sha256_hash_transaction| FabricNetwork
+    FabricNetwork -->|transaction_confirmed_id| P_CHAIN_EXEC
+    P_CHAIN_EXEC -->|update_chain_status_confirmed| T_DOCS
+    P_CHAIN_EXEC -->|write_audit_log chain_write_confirmed| T_AUDIT
 
     IOUser -->|request_review_queue| P_REVIEW_QUEUE
     AdminUser -->|request_global_review_queue| P_REVIEW_QUEUE
@@ -374,16 +461,26 @@ flowchart TB
     Intruder["👤 Unauthorized Role (Defense / Civilian)"]
     Prosecutor["⚖️ Public Prosecutor"]
 
-    P_REQ_CREATE(["2.5.1 POST /cases/:id/evidence-requests<br/>Dispatch requisition to FSL, Hospital, Bank"])
-    P_REQ_LIST(["2.5.2 GET /cases/:id/evidence-requests<br/>Multi-tenant scoped listing"])
-    P_REQ_SUBMIT(["2.5.3 POST /evidence-requests/:id/submit<br/>Default-deny gate & single-fulfillment upload"])
-    P_CHARGE_SHEET(["2.5.4 POST /cases/:id/file-charge-sheet<br/>Section 173 AND-Join checklist evaluation"])
+    subgraph REQ_WORKFLOW ["Evidence Requisition & Fulfillment"]
+        direction TB
+        P_REQ_CREATE(["2.5.1 POST /cases/:id/evidence-requests<br/>Dispatch requisition to FSL, Hospital, Bank"])
+        P_REQ_LIST(["2.5.2 GET /cases/:id/evidence-requests<br/>Multi-tenant scoped listing"])
+        P_REQ_SUBMIT(["2.5.3 POST /evidence-requests/:id/submit<br/>Default-deny gate & single-fulfillment upload"])
+    end
 
-    T_CASES[("cases<br/>investigation_status, crime_type")]
-    T_REQ[("evidence_requests<br/>case_id, requested_org_id, status")]
-    T_STAGE_REQ[("stage_requirements<br/>crime_type, stage, required_type")]
-    T_DOCS[("documents<br/>verified evidence uploads")]
-    T_AUDIT[("audit_logs<br/>evidence_requested, charge_sheet_filed")]
+    subgraph GATE_WORKFLOW ["Charge Sheet AND-Join Gate"]
+        direction TB
+        P_CHARGE_SHEET(["2.5.4 POST /cases/:id/file-charge-sheet<br/>Section 173 AND-Join checklist evaluation"])
+    end
+
+    subgraph EVID_STORES ["Data Stores"]
+        direction TB
+        T_CASES[("cases<br/>investigation_status, crime_type")]
+        T_REQ[("evidence_requests<br/>case_id, requested_org_id, status")]
+        T_STAGE_REQ[("stage_requirements<br/>crime_type, stage, required_type")]
+        T_DOCS[("documents<br/>verified evidence uploads")]
+        T_AUDIT[("audit_logs<br/>evidence_requested, charge_sheet_filed")]
+    end
 
     IOUser -->|create_requisition_payload| P_REQ_CREATE
     P_REQ_CREATE -->|verify_assigned_io| P_REQ_CREATE
@@ -428,16 +525,26 @@ flowchart TB
     CourtUser["⚖️ Judiciary / Judge"]
     AccusedUser["👤 Accused / Surety"]
 
-    P_ARREST(["2.6.1 POST /cases/:id/bail/arrest<br/>Record suspect arrest and start bail FSM"])
-    P_BAIL_APP(["2.6.2 POST /cases/:id/bail/application<br/>File Section 437/439 CrPC bail petition"])
-    P_BAIL_HEARING(["2.6.3 POST /cases/:id/bail/hearing-notice<br/>Court schedule bail hearing"])
-    P_BAIL_ORDER(["2.6.4 POST /cases/:id/bail/order<br/>Pronounce bail grant or final denial"])
-    P_BAIL_SURETY(["2.6.5 POST /cases/:id/bail/surety<br/>Register monetary/property surety bond"])
-    P_TRIAL_NOTICE(["2.6.6 POST /cases/:id/trial/hearing-notice<br/>Transition to Trial (Charge Sheet prerequisite)"])
-    P_JUDGMENT(["2.6.7 POST /cases/:id/judgment<br/>Record final verdict: convicted or acquitted"])
+    subgraph BAIL_FSM ["Independent Bail Lifecycle Track"]
+        direction TB
+        P_ARREST(["2.6.1 POST /cases/:id/bail/arrest<br/>Record suspect arrest and start bail FSM"])
+        P_BAIL_APP(["2.6.2 POST /cases/:id/bail/application<br/>File Section 437/439 CrPC bail petition"])
+        P_BAIL_HEARING(["2.6.3 POST /cases/:id/bail/hearing-notice<br/>Court schedule bail hearing"])
+        P_BAIL_ORDER(["2.6.4 POST /cases/:id/bail/order<br/>Pronounce bail grant or final denial"])
+        P_BAIL_SURETY(["2.6.5 POST /cases/:id/bail/surety<br/>Register monetary/property surety bond"])
+    end
 
-    T_CASES[("cases<br/>investigation_status, bail_status")]
-    T_AUDIT[("audit_logs<br/>action: bail_*, trial_*, judgment_pronounced")]
+    subgraph TRIAL_TRACK ["Judicial Trial Progression Track"]
+        direction TB
+        P_TRIAL_NOTICE(["2.6.6 POST /cases/:id/trial/hearing-notice<br/>Transition to Trial (Charge Sheet prerequisite)"])
+        P_JUDGMENT(["2.6.7 POST /cases/:id/judgment<br/>Record final verdict: convicted or acquitted"])
+    end
+
+    subgraph BAIL_STORES ["Data Stores"]
+        direction TB
+        T_CASES[("cases<br/>investigation_status, bail_status")]
+        T_AUDIT[("audit_logs<br/>action: bail_*, trial_*, judgment_pronounced")]
+    end
 
     IOUser -->|arrest_record_payload| P_ARREST
     P_ARREST -->|transition_bail_status_arrested| T_CASES
@@ -486,15 +593,29 @@ flowchart TB
     NCRBAnalyst["📊 NCRB Analyst"]
     Intruder["👤 Unauthorized Role"]
 
-    P_AUDIT_WRITE(["2.7.1 write_audit_log<br/>pg_advisory_xact_lock & monotonic seq increment"])
-    P_AUDIT_AI(["2.7.2 GET /cases/:id/audit-log/ai-parser<br/>Rate-limited 20/min, atomic write-on-read"])
-    P_AUDIT_CASE(["2.7.3 GET /cases/:id/audit-log<br/>Role-filtered envelopes: Full vs Summary"])
-    P_INTEGRITY(["2.7.4 GET /cases/:id/audit-log/chain-integrity<br/>Full cryptographic chain scan ordered by seq"])
-    P_NCRB_REPORT(["2.7.5 GET /reports/case-metadata<br/>De-identified crime analytics, zero PII"])
+    subgraph AUDIT_WRITE ["Audit Append Path"]
+        direction TB
+        P_AUDIT_WRITE(["2.7.1 write_audit_log<br/>pg_advisory_xact_lock & monotonic seq increment"])
+    end
 
-    T_AUDIT[("audit_logs<br/>id, seq, case_id, actor_user_id, action, prev_hash, row_hash")]
-    T_CASES[("cases<br/>case_number, crime_type, court_level, status")]
-    D_RATE_LIMIT[("Rate Limiter State<br/>sliding-window request timestamps")]
+    subgraph AUDIT_QUERY ["Audit Verification & Oversight"]
+        direction TB
+        P_AUDIT_AI(["2.7.2 GET /cases/:id/audit-log/ai-parser<br/>Rate-limited 20/min, atomic write-on-read"])
+        P_AUDIT_CASE(["2.7.3 GET /cases/:id/audit-log<br/>Role-filtered envelopes: Full vs Summary"])
+        P_INTEGRITY(["2.7.4 GET /cases/:id/audit-log/chain-integrity<br/>Full cryptographic chain scan ordered by seq"])
+    end
+
+    subgraph NCRB_TRACK ["Crime Analytics Track"]
+        direction TB
+        P_NCRB_REPORT(["2.7.5 GET /reports/case-metadata<br/>De-identified crime analytics, zero PII"])
+    end
+
+    subgraph AUDIT_STORES ["Data Stores"]
+        direction TB
+        T_AUDIT[("audit_logs<br/>id, seq, case_id, actor_user_id, action, prev_hash, row_hash")]
+        T_CASES[("cases<br/>case_number, crime_type, court_level, status")]
+        D_RATE_LIMIT[("Rate Limiter State<br/>sliding-window request timestamps")]
+    end
 
     P_AUDIT_WRITE -->|acquire_pg_advisory_lock_267190| P_AUDIT_WRITE
     P_AUDIT_WRITE -->|read_last_row_by_seq_desc| T_AUDIT
@@ -537,11 +658,11 @@ flowchart TB
 | **Case Dockets** | `cases` | `assert_case_access()` | Mutable status (`investigation_status`, `bail_status`) | Tracked in `AuditLog.case_id` |
 | **Case Assignment** | `case_assignments` | Only `sho` and `config_admin` | Exactly one active IO per case. Atomic deletion & insertion | `AuditLog(action='io_reassigned')` |
 | **Investigation Diary**| `case_diary_entries` | Strictly assigned IO and SHO | **Append-Only** (no updates, no deletions) | Embedded in sequential audit hash chain |
-| **Evidence Requisition**| `evidence_requests` | IO (create), Requested Org (fulfill) | Single-fulfillment guard (`completed` $\to$ 409) | `AuditLog(action='evidence_request_fulfilled')` |
+| **Evidence Requisition**| `evidence_requests` | IO (create), Requested Org (fulfill) | Single-fulfillment guard (`completed` $\\to$ 409) | `AuditLog(action='evidence_request_fulfilled')` |
 | **Evidence Files** | `documents` | Role-filtered via `app/redaction.py` | **Append-Only** versions (`v1, v2, ...`). Storage immutable | SHA-256 in MinIO + Fabric Blockchain (`chain_tx_id`) |
 | **Sensitivity Tags** | `document_sensitivity_tags` | Internal AI Parser + IO Corrections | Append-only. Raw text NEVER stored in tags | `AuditLog(action='auto_tag_completed')` |
 | **Bail Lifecycle** | `cases.bail_status` | Role-gated state transitions | Strict 5-state sequential Finite State Machine | `AuditLog(action='bail_*')` |
-| **Trial Progression** | `cases.investigation_status` | Gated by `Charge_Sheet_Filed` (Court only) | Sequential forward progression (`Trial` $\to$ `Judgment`) | `AuditLog(action='trial_*' \| 'judgment_pronounced')` |
+| **Trial Progression** | `cases.investigation_status` | Gated by `Charge_Sheet_Filed` (Court only) | Sequential forward progression (`Trial` $\\to$ `Judgment`) | `AuditLog(action='trial_*' \| 'judgment_pronounced')` |
 | **Audit Trail** | `audit_logs` | Auditor/Admin (Full), Operational (Summary) | **Strictly Immutable & Append-Only** | Linked SHA-256 hash chain ordered by monotonic `seq` |
 
 ---

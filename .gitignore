@@ -45,3 +45,6 @@ Thumbs.db
 # Generated PDFs & local docs
 *.pdf
 
+
+# Go vendor directory — regenerable via 'go mod vendor', not our code
+fabric-network/chaincode/*/vendor/

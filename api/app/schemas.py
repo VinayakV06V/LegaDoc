@@ -234,6 +234,50 @@ class AdminAuditLogEntry(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ---------- Document Schema & Recognizer Configuration ----------
+class SensitivityFieldSpec(BaseModel):
+    field_name: str
+    sensitive: bool
+
+
+class RecognizerMappingResponse(BaseModel):
+    id: UUID
+    entity_type: str
+    field_name: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DocumentSchemaResponse(BaseModel):
+    id: UUID
+    doc_type: str
+    tier: int
+    sensitivity_fields: Optional[list[SensitivityFieldSpec]] = None
+    recognizer_mappings: list[RecognizerMappingResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DocumentSchemaCreateRequest(BaseModel):
+    doc_type: str
+    tier: int  # 1, 2, or 3
+    sensitivity_fields: Optional[list[SensitivityFieldSpec]] = None
+
+
+class DocumentSchemaUpdateRequest(BaseModel):
+    tier: Optional[int] = None
+    sensitivity_fields: Optional[list[SensitivityFieldSpec]] = None
+
+
+class RecognizerMappingItem(BaseModel):
+    entity_type: str
+    field_name: str
+
+
+class RecognizerMappingSetRequest(BaseModel):
+    mappings: list[RecognizerMappingItem]
+
+
 # ---------- Evidence Requests (Flow 3) ----------
 class CreateEvidenceRequest(BaseModel):
     requested_org_id: UUID

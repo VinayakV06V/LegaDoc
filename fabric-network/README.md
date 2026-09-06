@@ -8,11 +8,14 @@ not last, and budget real time for it.
 
 **Read this before starting**: everything in this folder and in
 `workers/chain_worker/` was written without access to Docker, a Go
-compiler, or a running Fabric network. The code is a real, considered
-attempt at the correct shape — it is not proven to work. You (whoever picks
-this up) will be the first person to actually run it. Expect to debug real
-issues, especially in `fabric_client.py`'s exact SDK calls — its own
-docstring says exactly what to double-check first.
+compiler, or a running Fabric network — still true. What's changed since:
+`fabric_client.py`'s method calls have since been checked directly against
+fabric-sdk-py's actual source (not just training knowledge), so the SDK
+call shapes are confirmed correct — see that file's docstring. What's
+*still* unverified, because it genuinely requires a live network to check,
+is everything downstream of that: does the network come up cleanly, does
+the chaincode deploy, does a real signed transaction actually confirm. You
+(whoever picks this up) will be the first person to find that out.
 
 ## What's here
 
@@ -102,11 +105,13 @@ Deliberately narrow — not a generic asset-transfer sample. Three functions:
    "
    ```
 
-   If this fails, it is very likely `fabric_client.py`'s exact `hfc` API
-   calls, not the network — see that file's docstring for what to check
-   first (method names, whether `wait_for_event` is still a valid kwarg,
-   whether `get_user` takes the same arguments in whatever version
-   `pip install fabric-sdk-py` actually resolves to).
+   `fabric_client.py`'s method calls (`chaincode_invoke`/`chaincode_query`'s
+   `fcn=`/`wait_for_event=` kwargs, `get_user(org_name, name)`) have been
+   checked directly against fabric-sdk-py's own source, so if this fails
+   it's more likely the network/connection-profile/identity than the SDK
+   call shapes — check those first. `pysha3` (one of `hfc`'s dependencies)
+   needs a native compiler to install — run this inside the chain_worker
+   container or WSL, not bare Windows Python.
 
 ## Never commit here
 

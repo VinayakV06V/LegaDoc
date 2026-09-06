@@ -5,17 +5,23 @@ worker.py (idempotency, retry, DB state transitions) can be tested against
 a mock of THIS class, without needing a live Fabric network — see
 tests/test_worker_logic.py.
 
-HONESTY NOTE, read before trusting this file: fabric-sdk-py (the `hfc`
-package) is the community-maintained SDK SYSTEM_DESIGN.md deliberately
-chose for stack consistency, with its lower maturity explicitly accepted as
-a risk. This module is written against that library's documented usage
-pattern from training knowledge — there was no Go compiler, no Docker, and
-no live Fabric network available to actually install `hfc` and exercise
-this code against in the environment where it was written. Treat the
-overall shape (constructor args, async invoke/query split, response
-handling) as a solid starting point, and treat every exact method/parameter
-name as something to verify against the actual installed package's
-examples directory before trusting it in a real submission.
+VERIFIED, not just written from memory: every method/parameter name below
+was checked directly against hyperledger/fabric-sdk-py's actual source
+(hfc/fabric/client.py) and its own tutorial — `Client(net_profile=...)`,
+`get_user(org_name, name)` (sync), and `chaincode_invoke`/`chaincode_query`
+(both async, both take `fcn=` as a real keyword for the chaincode function
+name, `chaincode_invoke` also takes `wait_for_event=`). This still can't
+install here (`pysha3`, one of hfc's transitive deps, needs a native
+compiler this machine doesn't have — this is expected to work fine inside
+WSL/Docker, which do have one), so no actual network call has run against
+it. The call *shapes* are confirmed correct; only a live network can
+confirm the calls actually succeed end-to-end.
+
+One thing intentionally NOT hardened here: `chaincode_query`'s return
+value's exact type (raw bytes vs. decoded str) wasn't confirmed from the
+source in the time available — get_hash() below returns whatever hfc
+hands back unmodified. Decode/parse it explicitly the first time something
+actually consumes GetHash's response, don't assume either shape.
 """
 
 import asyncio
@@ -70,14 +76,14 @@ class FabricClient:
         except ImportError as e:
             raise FabricSubmissionError(
                 "fabric-sdk-py (hfc) is not installed. `pip install fabric-sdk-py` "
-                "and confirm the import path/class name still matches — this "
-                "package's API has shifted across versions."
+                "— this needs a native compiler (one of hfc's own deps, pysha3, "
+                "builds a C extension), which WSL/Docker have and bare Windows "
+                "usually doesn't. Run this inside the chain_worker container or "
+                "WSL, not a native Windows Python."
             ) from e
 
         self._client = HFCClient(net_profile=self.connection_profile_path)
-        # VERIFY: get_user's exact signature/kwargs against the installed
-        # hfc version — this is the pattern documented in fabric-sdk-py's
-        # own README examples as of this writing.
+        # Signature confirmed against hfc/fabric/client.py: get_user(org_name, name), sync.
         self._user = self._client.get_user(org_name=self.org_name, name=self.user_name)
 
     async def _submit_hash_async(self, doc_id: str, doc_hash: str, org_id: str) -> dict:

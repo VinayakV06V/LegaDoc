@@ -119,6 +119,24 @@ class LegalPIIRecognizer:
             "confidence": 80,
             "capture_group": 1,
         },
+        # 6c. Complainant / Informant / Accused names in FIR headers (tolerant of OCR mixed case)
+        {
+            "entity_type": "PERSON",
+            "regex": re.compile(
+                r"(?i)\b(?:Name|Complainant|Informant|Accused|Suspect|Victim)[\s\:\-\/\.]+(?:(?:Shri|Smt|Mr|Dr)\.?\s+)?([A-Za-z]{3,}(?:\s+[A-Za-z]{2,}){1,4})\b"
+            ),
+            "confidence": 80,
+            "capture_group": 1,
+        },
+        # 6d. Parent/Spouse names following s/o, w/o, d/o with optional honorifics (LT. Sh., Smt., etc.)
+        {
+            "entity_type": "PERSON",
+            "regex": re.compile(
+                r"(?i)\b(?:son\s+of|daughter\s+of|wife\s+of|s/o|w/o|d/o)[\s\:\-\.]*(?:LT\.?\s*)?(?:Sh\.?|Smt\.?|Mr\.?|Dr\.?)?\s*([A-Za-z]{3,}(?:\s+[A-Za-z]{2,}){1,4})\b"
+            ),
+            "confidence": 80,
+            "capture_group": 1,
+        },
     ]
 
     @classmethod

@@ -443,28 +443,230 @@ def list_admin_audit_logs(
     return results
 
 
-# ---------- Schema & Requirements Endpoints (Explicit 501 Not Implemented) ----------
+# ---------- Document Schema & Recognizer Configuration ----------
 
-@router.get("/document-schemas")
-def list_document_schemas(claims: dict = Depends(require_role("config_admin"))):
-    """GET /admin/document-schemas — Config Admin.
-    Explicit 501: Dynamic document schema configuration is not implemented in this build.
-    """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Dynamic document schema configuration is not implemented in this build. Sensitivity tiers and recognizers are governed by static pipeline policies in app/redaction.py."
+@router.get("/document-schemas", response_model=list[schemas.DocumentSchemaResponse])
+def list_document_schemas(
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """GET /admin/document-schemas — Config Admin. List all configured document schemas with their recognizer mappings."""
+    return db.query(models.DocumentSchemaConfig).order_by(models.DocumentSchemaConfig.created_at).all()
+
+
+@router.post("/document-schemas", response_model=schemas.DocumentSchemaResponse, status_code=status.HTTP_201_CREATED)
+def create_document_schema(
+    body: schemas.DocumentSchemaCreateRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """POST /admin/document-schemas — Config Admin. Create a new document schema."""
+    doc_type_normalized = body.doc_type.strip()
+    if not doc_type_normalized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="doc_type cannot be empty."
+        )
+
+    if body.tier not in (1, 2, 3):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tier must be 1, 2, or 3."
+        )
+
+    if body.tier == 3:
+        if body.sensitivity_fields is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 3 schemas must have null sensitivity_fields (inherits generic default profile)."
+            )
+    else:
+        if not body.sensitivity_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 1 and Tier 2 schemas must specify non-empty sensitivity_fields."
+            )
+
+    existing = db.query(models.DocumentSchemaConfig).filter(
+        models.DocumentSchemaConfig.doc_type == doc_type_normalized
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Document schema for '{doc_type_normalized}' already exists."
+        )
+
+    fields_data = [f.model_dump() for f in body.sensitivity_fields] if body.sensitivity_fields is not None else None
+    schema_config = models.DocumentSchemaConfig(
+        doc_type=doc_type_normalized,
+        tier=body.tier,
+        sensitivity_fields=fields_data,
+    )
+    db.add(schema_config)
+    db.commit()
+    db.refresh(schema_config)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="document_schema_created",
+        actor_user_id=actor_id,
+        target_type="document_schema",
+        target_id=schema_config.id,
+        metadata={
+            "doc_type": schema_config.doc_type,
+            "tier": schema_config.tier,
+            "sensitivity_fields": schema_config.sensitivity_fields,
+        }
     )
 
+    return schema_config
 
-@router.post("/document-schemas/{doc_type}/recognizers")
-def set_recognizer_mapping(doc_type: str, claims: dict = Depends(require_role("config_admin"))):
-    """POST /admin/document-schemas/:type/recognizers — Config Admin.
-    Explicit 501: Dynamic entity recognizer mapping is not implemented in this build.
-    """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Dynamic entity recognizer mapping is not implemented in this build. Entity mappings are currently static."
+
+@router.put("/document-schemas/{doc_type}", response_model=schemas.DocumentSchemaResponse)
+def update_document_schema(
+    doc_type: str,
+    body: schemas.DocumentSchemaUpdateRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """PUT /admin/document-schemas/{doc_type} — Config Admin. Update an existing document schema."""
+    schema_config = db.query(models.DocumentSchemaConfig).filter(
+        models.DocumentSchemaConfig.doc_type == doc_type.strip()
+    ).first()
+    if not schema_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document schema for '{doc_type}' not found."
+        )
+
+    target_tier = body.tier if body.tier is not None else schema_config.tier
+    if target_tier not in (1, 2, 3):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tier must be 1, 2, or 3."
+        )
+
+    if "sensitivity_fields" in body.model_fields_set:
+        target_fields = [f.model_dump() for f in body.sensitivity_fields] if body.sensitivity_fields is not None else None
+    else:
+        target_fields = schema_config.sensitivity_fields
+
+    if target_tier == 3:
+        if target_fields is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 3 schemas must have null sensitivity_fields (inherits generic default profile)."
+            )
+    else:
+        if not target_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 1 and Tier 2 schemas must specify non-empty sensitivity_fields."
+            )
+
+    prev_tier = schema_config.tier
+    prev_fields = schema_config.sensitivity_fields
+
+    schema_config.tier = target_tier
+    schema_config.sensitivity_fields = target_fields
+
+    db.commit()
+    db.refresh(schema_config)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="document_schema_updated",
+        actor_user_id=actor_id,
+        target_type="document_schema",
+        target_id=schema_config.id,
+        metadata={
+            "doc_type": schema_config.doc_type,
+            "previous_tier": prev_tier,
+            "new_tier": schema_config.tier,
+            "previous_sensitivity_fields": prev_fields,
+            "new_sensitivity_fields": schema_config.sensitivity_fields,
+        }
     )
+
+    return schema_config
+
+
+@router.post("/document-schemas/{doc_type}/recognizers", response_model=list[schemas.RecognizerMappingResponse])
+def set_recognizer_mappings(
+    doc_type: str,
+    body: schemas.RecognizerMappingSetRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """POST /admin/document-schemas/{doc_type}/recognizers — Config Admin. Full replace of recognizer mappings for a doc type."""
+    schema_config = db.query(models.DocumentSchemaConfig).filter(
+        models.DocumentSchemaConfig.doc_type == doc_type.strip()
+    ).first()
+    if not schema_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document schema for '{doc_type}' not found."
+        )
+
+    # Validate referential integrity: every field_name in body must match sensitivity_fields in schema
+    valid_fields = set()
+    if schema_config.sensitivity_fields:
+        for f in schema_config.sensitivity_fields:
+            if isinstance(f, dict) and "field_name" in f:
+                valid_fields.add(f["field_name"])
+
+    for item in body.mappings:
+        if item.field_name not in valid_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Field '{item.field_name}' does not exist in sensitivity_fields for schema '{doc_type}'."
+            )
+
+    prev_mappings = [
+        {"entity_type": rm.entity_type, "field_name": rm.field_name}
+        for rm in schema_config.recognizer_mappings
+    ]
+
+    # Full replace: delete existing mappings for this document_schema_id
+    db.query(models.RecognizerMapping).filter(
+        models.RecognizerMapping.document_schema_id == schema_config.id
+    ).delete()
+
+    # Insert new mappings
+    for item in body.mappings:
+        rm = models.RecognizerMapping(
+            document_schema_id=schema_config.id,
+            entity_type=item.entity_type.strip(),
+            field_name=item.field_name.strip(),
+        )
+        db.add(rm)
+
+    db.commit()
+    db.refresh(schema_config)
+
+    new_mappings = schema_config.recognizer_mappings
+    new_mappings_audit = [
+        {"entity_type": item.entity_type.strip(), "field_name": item.field_name.strip()}
+        for item in body.mappings
+    ]
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="recognizer_mapping_updated",
+        actor_user_id=actor_id,
+        target_type="document_schema",
+        target_id=schema_config.id,
+        metadata={
+            "doc_type": schema_config.doc_type,
+            "previous_mappings": prev_mappings,
+            "new_mappings": new_mappings_audit,
+        }
+    )
+
+    return new_mappings
 
 
 @router.get("/stage-requirements")

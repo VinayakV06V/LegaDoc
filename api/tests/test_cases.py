@@ -199,13 +199,79 @@ def test_assigned_io_can_add_and_list_case_diary_entries(client, make_user):
     assert cd_resp.status_code == 201
     entry = cd_resp.json()
     assert entry["case_id"] == case["id"]
-    assert entry["status"] == "ready"
+    # "processing", not "ready" — it hasn't been through the AI Parser yet.
+    # See test_case_diary_entry_is_dispatched_to_ai_parser below: this used
+    # to be a real gap, entries were marked "ready" immediately and never
+    # actually redacted.
+    assert entry["status"] == "processing"
     assert "Visited scene" in entry["text"]
 
-    # IO lists diary entries
+    # IO (assigned) sees it even while still processing
     list_resp = client.get(f"/cases/{case['id']}/case-diary", headers=auth_headers(io_token))
     assert list_resp.status_code == 200
     assert len(list_resp.json()) == 1
+
+
+def test_case_diary_entry_is_dispatched_to_ai_parser(client, make_user, fake_queue):
+    """The actual fix: adding a diary entry must enqueue AI Parser tagging,
+    not just create the row and call it done."""
+    duty = make_user("duty_officer", email="duty_cd2@example.com", password="pw")
+    sho = make_user("sho", email="sho_cd2@example.com", password="pw", org=duty.organization)
+    io = make_user("io", email="io_cd2@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty_cd2@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho_token = login(client, "sho_cd2@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    io_token = login(client, "io_cd2@example.com", "pw").json()["access_token"]
+    cd_resp = client.post(
+        f"/cases/{case['id']}/case-diary",
+        json={"text": "Informant Ramesh Kumar, phone 9876543210, tipped off location."},
+        headers=auth_headers(io_token),
+    )
+    assert cd_resp.status_code == 201
+    entry_id = cd_resp.json()["id"]
+
+    dispatched = [j for j in fake_queue.enqueued if j["task_name"] == "ai_parser_worker.tag_case_diary_entry"]
+    assert len(dispatched) == 1
+    assert dispatched[0]["kwargs"]["case_diary_entry_id"] == entry_id
+
+
+def test_unassigned_role_only_sees_ready_diary_entries_not_processing(client, make_user):
+    """A non-IO/SHO role with case access (e.g. court) must never see a
+    diary entry that hasn't been through redaction yet."""
+    duty = make_user("duty_officer", email="duty_cd3@example.com", password="pw")
+    sho = make_user("sho", email="sho_cd3@example.com", password="pw", org=duty.organization)
+    io = make_user("io", email="io_cd3@example.com", password="pw", org=duty.organization)
+    court = make_user("court", email="court_cd3@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty_cd3@example.com", "pw").json()["access_token"]
+    case = _register_fir(client, duty_token)
+
+    sho_token = login(client, "sho_cd3@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    io_token = login(client, "io_cd3@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/case-diary",
+        json={"text": "Still processing, not yet redacted."},
+        headers=auth_headers(io_token),
+    )
+
+    court_token = login(client, "court_cd3@example.com", "pw").json()["access_token"]
+    court_view = client.get(f"/cases/{case['id']}/case-diary", headers=auth_headers(court_token))
+    assert court_view.status_code == 200
+    assert court_view.json() == []  # the "processing" entry is correctly hidden
 
 
 def test_unassigned_io_cannot_add_or_list_case_diary(client, make_user):

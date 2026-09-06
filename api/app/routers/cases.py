@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.audit import write_audit_log
 from app.database import get_db
+from app.queue import QueueClient, get_queue
 from app.security import (
-    _UNRESTRICTED_CASE_ROLES,
     assert_case_access,
     get_current_claims,
     require_role,
@@ -228,10 +228,19 @@ def add_case_diary_entry(
     body: schemas.CaseDiaryCreate,
     claims: dict = Depends(require_role("io", "sho")),
     db: Session = Depends(get_db),
+    queue_client: QueueClient = Depends(get_queue),
 ):
     """POST /cases/:id/case-diary — IO / SHO. Append a running case-diary entry.
     Append-only, not a Document upload. Validates case access and prevents raw PII
     leakage into audit log metadata.
+
+    Routes through the AI Parser before being visible beyond the assigned
+    IO/SHO — see SYSTEM_DESIGN.md, "Case Diary now routes through the
+    redaction pipeline". Starts at status="processing" (the model's own
+    default) and is dispatched to ai_parser_worker.tag_case_diary_entry,
+    the same worker task that tags documents — that task flips it to
+    "ready" once tagging completes. Never mark this "ready" here; that was
+    the actual gap this fixes — entries used to skip redaction entirely.
     """
     try:
         case_uuid = UUID(case_id)
@@ -251,11 +260,13 @@ def add_case_diary_entry(
         case_id=case_uuid,
         author_user_id=UUID(claims["sub"]),
         text=body.text,
-        status="ready",
+        status="processing",
     )
     db.add(entry)
     db.commit()
     db.refresh(entry)
+
+    queue_client.enqueue("ai_parser_worker.tag_case_diary_entry", case_diary_entry_id=str(entry.id))
 
     # Security check: Never put raw diary text or PII into audit log metadata
     write_audit_log(
@@ -298,8 +309,15 @@ def list_case_diary_entries(
     role = claims.get("role", "")
     query = db.query(models.CaseDiaryEntry).filter(models.CaseDiaryEntry.case_id == case_uuid)
 
-    # If not IO/SHO or unrestricted admin, only show 'ready' entries
-    if role not in (_UNRESTRICTED_CASE_ROLES | {"io"}):
+    # Only the assigned IO/SHO see un-redacted "processing" entries — every
+    # other role, including config_admin/security_auditor/court/prosecutor
+    # (which _UNRESTRICTED_CASE_ROLES grants unrestricted *case* access to),
+    # only ever sees "ready" ones. Unrestricted case access is not the same
+    # thing as "allowed to see text before the AI Parser has redacted it" —
+    # conflating the two here was a real bug: court/prosecutor/config_admin/
+    # security_auditor could all see un-redacted diary text, contradicting
+    # this function's own docstring.
+    if role not in ("io", "sho"):
         query = query.filter(models.CaseDiaryEntry.status == "ready")
 
     return query.order_by(models.CaseDiaryEntry.created_at.asc()).all()

@@ -1,526 +1,561 @@
-# LegaDoc — Master System Design & Workflow Diagrams (DFD / DRD)
+# LegaDoc — Exhaustive Repository Data Flow Diagrams (DFD / DRD)
 
-**Project**: SIH26190 — Smart Legal Document Management System  
-**Architecture Baseline**: Post-Phase 5 (Full Operational Stack Complete)  
-**Author**: Ishaan Nasir (Backend, Ingestion Pipeline, Lifecycle & Security Substrate)  
-**Status**: Authoritative Reference for Team Meetings & Judicial Evaluation
-
----
-
-## 1. Executive Summary & Scope Audit
-
-### 1.1 Is the Original Backend Scope Complete?
-**YES — 100% of Ishaan's original backend jurisdiction is implemented, hardened, and verified.**
-
-Every single flow, endpoint, security barrier, and data model specified in `SYSTEM_DESIGN.md` across Phases 1 through 5 is active in code and covered by **110 automated tests (100% passing, 0 failures)** in Docker:
-
-- **Phase 1 (Merged)**: Authoritative JWT Authentication (15-min access + 7-day refresh), bcrypt with constant-time dummy hashes, 18 canonical multi-tenant roles across 8 legal domains, and PostgreSQL tamper-evident hash-chained audit substrate.
-- **Phase 2 (Merged)**: Streaming native MIME sniffer (libmagic/python-magic), 50MB strict file cap, SHA-256 deduplication, MinIO S3 object storage with SSE-S3 AES-256, Celery worker dispatch (Track A & Track B), and dynamic redaction masking engine (`app/redaction.py`).
-- **Phase 3 (PR #19)**: Section 91 parallel evidence requisitions with tenant isolation, Section 173 Charge Sheet AND-Join gate, independent 5-state Bail FSM, Judicial Trial progression to terminal verdict, Section 172 Case Diary with zero PII leakage, and default-deny security hardening on external evidence submission (closing Issue #24).
-- **Phase 4 (PR #20)**: Flow 6 Audit Trail, dual response envelopes (Full Cryptographic vs Operational Summary), Domain 8 separation of duties (Security Auditor only on `/ai-parser`), sliding-window rate limiting (20/min), atomic write-on-read meta-audit, and monotonic sequence counter (`seq`) eliminating microsecond timestamp race ties.
-- **Phase 5 (PR #35)**: Domain 7 NCRB de-identified case metadata reporting (`GET /reports/case-metadata`), Flow 1 Investigating Officer mid-case reassignment (`POST /cases/:id/reassign-io`), Flow 2 document review queue (`GET /documents?status=needs_review`), and end-to-end pipeline & artifact generation test.
+> **Repository:** [LegaDoc](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc)  
+> **Standard:** Complete Data Flow Diagram set spanning Level 0 (Context), Level 1 (Macro Subsystems), and Level 2 (Micro Decompositions for all 7 submodules).  
+> **Validation:** Standard Mermaid flowchart syntax without bidirectional link errors, unquoted delimiters, stateDiagram-v2 parse bugs, or recursive loops.
 
 ---
 
-## 2. C4 Context Diagram (System Ecosystem)
-
-This diagram defines the high-level actors, external organizations, and boundary of the LegaDoc platform.
+## 1. DFD Level 0 — System Context (The Macro Boundary)
 
 ```mermaid
-C4Context
-    title System Context Diagram — LegaDoc Criminal Justice Management System
+flowchart TB
+    %% External Entities (Users)
+    POLICE["👤 Police Personnel<br/>(Duty Officer / SHO / IO)"]
+    AUTH["🏛️ External Authorities<br/>(FSL Forensics / Hospital / Bank / Telecom)"]
+    COURT["⚖️ Judiciary & Prosecution<br/>(Judge / Magistrate / Public Prosecutor)"]
+    DEFENSE["🛡️ Defense & Accused<br/>(Defense Counsel / Accused)"]
+    AUDITOR["🔍 Security Auditor<br/>(Independent Redaction Oversight)"]
+    ANALYST["📊 NCRB / Crime Analyst<br/>(National Crime Records Bureau)"]
 
-    Person(duty_officer, "Duty Officer", "Registers FIR and initiates case docket at police station")
-    Person(sho, "Station House Officer (SHO)", "Supervises station, assigns & reassigns Investigating Officers")
-    Person(io, "Investigating Officer (IO)", "Leads investigation, gathers evidence, files case diary, requests forensics")
-    Person(authority_user, "External Authority Staff", "Forensics (FSL), Hospitals, Banks, Telecom fulfilling Sec 91 requisitions")
-    Person(prosecutor, "Public Prosecutor", "Evaluates evidence checklist & files Section 173 Charge Sheet")
-    Person(court, "Judiciary / Court", "Schedules hearings, evaluates bail petitions, issues orders, pronounces judgments")
-    Person(defense, "Defense Counsel", "Submits bail applications on behalf of accused; access restricted to bail track")
-    Person(auditor, "Security Auditor", "Inspects AI parser redaction decisions and compliance via meta-audited logs")
-    Person(ncrb, "NCRB / Crime Analyst", "Consumes de-identified statistical case metadata for national crime reporting")
+    %% External Systems
+    FABRIC["⛓️ Hyperledger Fabric<br/>(Permissioned Blockchain Ledger)"]
 
-    System(legadoc_system, "LegaDoc Platform", "Unified secure evidence ingestion, AI redaction, lifecycle orchestration, and immutable audit trail")
+    %% Central Process
+    LEGADOC(["0.0 LEGADOC CRIMINAL JUSTICE OS<br/>(FastAPI Monolith, Ingestion & Lifecycle Workers)"])
 
-    System_Ext(fabric_blockchain, "Hyperledger Fabric", "Permissioned blockchain recording immutable document SHA-256 transaction hashes")
+    %% Data Stores
+    STORAGE[("💾 MinIO Object Storage<br/>org_id/case_id/doc_id/v{version}")]
+    DB[("💾 PostgreSQL 16 Multi-Tenant Core<br/>(Cases, Documents, Tags, AuditLog)")]
+    REDIS[("💾 Redis 7 AOF Persistent<br/>(Celery Broker, Rate Limiter Cache)")]
 
-    Rel(duty_officer, legadoc_system, "Registers FIR docket", "REST / HTTPS")
-    Rel(sho, legadoc_system, "Assigns / Reassigns IO", "REST / HTTPS")
-    Rel(io, legadoc_system, "Uploads evidence, records diary, requisitions proof", "REST / HTTPS")
-    Rel(authority_user, legadoc_system, "Submits certified evidence records", "REST / HTTPS")
-    Rel(prosecutor, legadoc_system, "Gates charge sheet filing", "REST / HTTPS")
-    Rel(court, legadoc_system, "Adjudicates bail & trials", "REST / HTTPS")
-    Rel(defense, legadoc_system, "Files bail petitions", "REST / HTTPS")
-    Rel(auditor, legadoc_system, "Audits redaction decisions", "REST / HTTPS")
-    Rel(ncrb, legadoc_system, "Reads de-identified metadata", "REST / HTTPS")
+    %% User Ingestion & Responses
+    POLICE -->|credentials, fir dockets, evidence, case diary| LEGADOC
+    AUTH -->|credentials and section 91 evidence reports| LEGADOC
+    COURT -->|credentials, hearing notices, bail orders, judgments| LEGADOC
+    DEFENSE -->|credentials, bail applications, surety bonds| LEGADOC
+    AUDITOR -->|credentials and ai parser audit queries| LEGADOC
+    ANALYST -->|credentials and metadata report filters| LEGADOC
 
-    Rel(legadoc_system, fabric_blockchain, "Dispatches SHA-256 hash txs", "gRPC / Fabric SDK")
+    LEGADOC -->|case docket, assigned cases, review queues| POLICE
+    LEGADOC -->|routed evidence requisitions| AUTH
+    LEGADOC -->|unredacted judicial evidence, charge sheets| COURT
+    LEGADOC -->|bail status and hearing schedules| DEFENSE
+    LEGADOC -->|decision metrics, confidence scores, zero pii| AUDITOR
+    LEGADOC -->|deidentified crime metadata analytics| ANALYST
+
+    %% System Integrations
+    LEGADOC -->|signed sha256 hash transactions| FABRIC
+    FABRIC -->|block confirmation and transaction id| LEGADOC
+
+    %% Data Storage
+    LEGADOC -->|write encrypted blobs and presigned urls| STORAGE
+    STORAGE -->|read binary streams| LEGADOC
+    LEGADOC -->|sql transactions, rls scoping, seq audit chain| DB
+    DB -->|relational records and row verification| LEGADOC
+    LEGADOC -->|enqueue async jobs and check rate limits| REDIS
+    REDIS -->|dequeue jobs to celery workers| LEGADOC
 ```
 
 ---
 
-## 3. C4 Container Diagram (Service & Storage Architecture)
+## 2. DFD Level 1 — Macro Repository Data Flow
 
 ```mermaid
-C4Container
-    title Container Architecture Diagram — LegaDoc Infrastructure
+flowchart TB
+    UserPolice["👤 Duty Officer / SHO / IO"]
+    UserAuth["🏛️ External Authority"]
+    UserJudiciary["⚖️ Court / Prosecutor"]
+    UserDefense["🛡️ Defense Counsel"]
+    UserAuditor["🔍 Security Auditor / NCRB"]
+    FabricLedger["⛓️ Hyperledger Fabric"]
 
-    Person(user, "Authenticated User", "Police, Court, Authority, Defense, Auditor")
+    P_AUTH(["1.0 /auth & /admin/roles<br/>Session, Identity & Multi-Tenant RBAC"])
+    P_CASES(["2.0 /cases & Reassign<br/>FIR Registration, Assignment & Case Diary"])
+    P_INGEST(["3.0 /documents (Upload)<br/>Streaming Sniffer, MinIO & Celery Dispatch"])
+    P_WORKER(["4.0 Workers & Review Queue<br/>OCR, AI Tagging, Redaction & Needs Review"])
+    P_EVID(["5.0 /evidence-requests & Gate<br/>Sec 91 Requisitions & Charge Sheet Gate"])
+    P_BAIL_TRIAL(["6.0 /bail & /trial<br/>Independent Bail FSM & Judicial Trial"])
+    P_AUDIT_NCRB(["7.0 /audit-log & /reports<br/>Sequential Audit Chaining & NCRB Reporting"])
 
-    Container_Boundary(legadoc_boundary, "LegaDoc Core Infrastructure") {
-        Container(api_gateway, "FastAPI Application Server", "Python 3.11, FastAPI, Pydantic v2", "Enforces RBAC, rate limiting, request validation, MIME sniffing, and redaction views")
-        ContainerDb(postgres_db, "PostgreSQL 16", "Relational Database", "Stores cases, documents, sensitivity tags, bail FSM, and sequential hash-chained audit log")
-        ContainerDb(redis_store, "Redis 7 (AOF Persistent)", "In-Memory Cache & Message Broker", "Celery task broker, rate limiting storage, and async queue")
-        ContainerDb(minio_storage, "MinIO Object Storage (S3 API)", "Encrypted Object Storage", "Stores raw and processed evidence files with SSE-S3 AES-256 encryption at rest")
-        
-        Container(ocr_worker, "OCR & Extraction Worker", "Celery, Python, PaddleOCR", "Extracts raw text from uploaded images and scanned PDFs (Track B)")
-        Container(ai_parser_worker, "AI Parser Worker", "Celery, Presidio, spaCy", "Identifies PII entities, generates sensitivity tags, auto-flags low confidence to needs_review")
-        Container(chain_worker, "Blockchain Write Worker", "Celery, Fabric Python SDK", "Submits document SHA-256 hash transactions to Hyperledger Fabric (Track A)")
-    }
+    D_USERS[("💾 D1: users & orgs<br/>users, organizations, roles, permissions")]
+    D_CASES[("💾 D2: cases & assignments<br/>cases, case_assignments, case_diary_entries")]
+    D_DOCS[("💾 D3: documents<br/>documents, versions, raw_text, storage_path")]
+    D_TAGS[("💾 D4: sensitivity_tags<br/>document_sensitivity_tags, zero pii text")]
+    D_EVID[("💾 D5: evidence_requests<br/>evidence_requests, stage_requirements")]
+    D_S3[("💾 D6: MinIO S3<br/>org_id/case_id/doc_id/v{version}")]
+    D_REDIS[("💾 D7: Redis Queues<br/>Celery broker, sliding rate limits")]
+    D_AUDIT[("💾 D8: audit_logs<br/>pg_advisory_xact_lock, monotonic seq, row_hash")]
 
-    System_Ext(fabric_network, "Hyperledger Fabric Network", "Distributed Ledger", "Maintains immutable evidentiary anchor on legadoc-channel")
+    %% Auth interactions
+    UserPolice -->|login credentials| P_AUTH
+    UserAuth -->|login credentials| P_AUTH
+    UserJudiciary -->|login credentials| P_AUTH
+    UserDefense -->|login credentials| P_AUTH
+    UserAuditor -->|login credentials| P_AUTH
+    P_AUTH -->|validate_credentials_and_constant_time_dummy| D_USERS
+    D_USERS -->|user_record_and_canonical_role| P_AUTH
+    P_AUTH -->|jwt_access_and_refresh_tokens| UserPolice
 
-    Rel(user, api_gateway, "API calls via JWT", "HTTPS / JSON")
-    Rel(api_gateway, postgres_db, "Reads/Writes application state & audit logs", "SQL / SQLAlchemy Pool")
-    Rel(api_gateway, redis_store, "Enqueues Celery jobs, checks rate limits", "Redis Protocol")
-    Rel(api_gateway, minio_storage, "Streams validated files, issues presigned URLs", "S3 API (boto3)")
+    %% Cases interactions
+    UserPolice -->|register_fir_payload| P_CASES
+    P_CASES -->|insert_case_and_status_fir_registered| D_CASES
+    UserPolice -->|assign_or_reassign_io| P_CASES
+    P_CASES -->|atomic_swap_case_assignments| D_CASES
+    P_CASES -->|append_case_diary_entry| D_CASES
+    P_CASES -->|emit_audit_event_io_assigned| D_AUDIT
 
-    Rel(redis_store, ocr_worker, "Pulls OCR extraction tasks", "Celery Protocol")
-    Rel(redis_store, ai_parser_worker, "Pulls entity tagging tasks", "Celery Protocol")
-    Rel(redis_store, chain_worker, "Pulls hash commit tasks", "Celery Protocol")
+    %% Ingestion interactions
+    UserPolice -->|multipart_document_upload| P_INGEST
+    P_INGEST -->|sniff_8kb_magic_bytes_and_50mb_cap| P_INGEST
+    P_INGEST -->|stream_encrypted_file_blob| D_S3
+    P_INGEST -->|insert_document_processing| D_DOCS
+    P_INGEST -->|enqueue_track_a_and_track_b| D_REDIS
 
-    Rel(ocr_worker, minio_storage, "Fetches raw file", "S3 API")
-    Rel(ocr_worker, postgres_db, "Updates Document.raw_text", "SQL")
-    Rel(ocr_worker, redis_store, "Enqueues AI parser tagging job", "Celery Protocol")
+    %% Worker & Review interactions
+    D_REDIS -->|dequeue_ocr_and_ai_jobs| P_WORKER
+    P_WORKER -->|read_raw_file| D_S3
+    P_WORKER -->|update_raw_text| D_DOCS
+    P_WORKER -->|insert_presidio_sensitivity_tags| D_TAGS
+    P_WORKER -->|submit_hash_transaction| FabricLedger
+    FabricLedger -->|transaction_id_and_confirmed| P_WORKER
+    P_WORKER -->|update_chain_status_confirmed| D_DOCS
+    P_WORKER -->|flag_needs_review_if_confidence_low| D_DOCS
+    P_WORKER -->|emit_auto_tag_completed| D_AUDIT
+    UserPolice -->|review_queue_and_human_correction| P_WORKER
+    P_WORKER -->|apply_redaction_masks_by_role| UserJudiciary
 
-    Rel(ai_parser_worker, postgres_db, "Writes DocumentSensitivityTag & AuditLog", "SQL")
-    Rel(chain_worker, postgres_db, "Updates chain_status & writes AuditLog", "SQL")
-    Rel(chain_worker, fabric_network, "Submits signed hash transaction", "gRPC")
+    %% Evidence & Charge sheet
+    UserPolice -->|create_section_91_request| P_EVID
+    P_EVID -->|insert_evidence_request| D_EVID
+    UserAuth -->|submit_certified_evidence| P_EVID
+    P_EVID -->|verify_tenant_match_and_default_deny| D_EVID
+    P_EVID -->|mark_request_completed_and_attach_doc| D_EVID
+    UserJudiciary -->|file_charge_sheet_attempt| P_EVID
+    D_EVID -->|check_mandatory_documents_and_evidence| P_EVID
+    P_EVID -->|update_status_charge_sheet_filed| D_CASES
+    P_EVID -->|emit_charge_sheet_filed_event| D_AUDIT
+
+    %% Bail & Trial
+    UserPolice -->|record_arrest| P_BAIL_TRIAL
+    UserDefense -->|submit_bail_petition| P_BAIL_TRIAL
+    UserJudiciary -->|schedule_hearing_and_issue_order| P_BAIL_TRIAL
+    P_BAIL_TRIAL -->|update_bail_fsm_state| D_CASES
+    UserJudiciary -->|schedule_trial_hearing| P_BAIL_TRIAL
+    P_BAIL_TRIAL -->|update_investigation_status_trial| D_CASES
+    UserJudiciary -->|pronounce_judgment_verdict| P_BAIL_TRIAL
+    P_BAIL_TRIAL -->|update_status_judgment_terminal| D_CASES
+    P_BAIL_TRIAL -->|emit_fsm_and_judgment_audit| D_AUDIT
+
+    %% Audit & NCRB
+    UserAuditor -->|inspect_ai_parser_decisions| P_AUDIT_NCRB
+    D_REDIS -->|check_sliding_window_20_per_min| P_AUDIT_NCRB
+    P_AUDIT_NCRB -->|write_on_read_meta_audit_row| D_AUDIT
+    P_AUDIT_NCRB -->|verify_monotonic_seq_hash_chain| D_AUDIT
+    D_AUDIT -->|clean_chain_integrity_status| P_AUDIT_NCRB
+    UserAuditor -->|get_deidentified_crime_metadata| P_AUDIT_NCRB
+    D_CASES -->|project_non_pii_columns_only| P_AUDIT_NCRB
+    P_AUDIT_NCRB -->|anonymized_statistical_records| UserAuditor
 ```
 
 ---
 
-## 4. Master Lifecycle Workflow Diagram
+## 3. Level 2 Detailed Decompositions (Subsystem-by-Subsystem)
 
-The complete journey of a criminal docket from initial incident report through trial, disposition, and national statistics.
+---
+
+### 3.1 DFD 2.1 — Authentication, Multi-Tenant RBAC & Role Management (`/auth`, `/admin/roles`)
+* **Key Files:** [`api/app/routers/auth.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/auth.py), [`api/app/security.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/security.py), [`api/app/routers/admin.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/admin.py), [`api/app/models.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/models.py)
 
 ```mermaid
-flowchart TD
-    subgraph S1["Stage 1: FIR Intake & Station Docket"]
-        A1["Citizen / Informant Complaint"] --> A2["Duty Officer: POST /cases\n(Register FIR)"]
-        A2 --> A3["Case Created in DB\nStatus: FIR_Registered"]
-        A3 --> A4["SHO: POST /cases/:id/assign-io\n(Assign IO)"]
-        A4 --> A5["CaseAssignment Created\nIO Granted Case Access"]
-    end
+flowchart TB
+    ClientUser["👤 User (Any Role)"]
+    AdminUser["👤 Config Admin"]
 
-    subgraph S2["Stage 2: Investigation & Ingestion (Dual Track)"]
-        A5 --> B1["IO: POST /cases/:id/case-diary\n(Sec 172 Diary Notes)"]
-        A5 --> B2["IO: POST /documents\n(Upload Evidence File)"]
-        A5 --> B3["IO: POST /cases/:id/evidence-requests\n(Sec 91 Forensic/Bank Requisition)"]
-        
-        B2 --> C1{"File Validation"}
-        C1 -->|MIME / Size Valid| C2["Store in MinIO S3\nCompute SHA-256"]
-        C1 -->|MIME Mismatch / >50MB| C3["Reject: HTTP 415 / 413"]
-        
-        C2 --> D1["Track A (Blockchain)"]
-        C2 --> D2["Track B (OCR & NLP)"]
-        
-        D1 --> D3["Chain Worker: Write Hash Tx\nStatus: confirmed"]
-        D2 --> D4["OCR Worker: Extract raw_text"]
-        D4 --> D5["AI Parser: Tag PII Entities"]
-        
-        D5 --> E1{"Tag Confidence >= 70%?"}
-        E1 -->|Yes| E2["Status: ready\nRedaction Active"]
-        E1 -->|No / Failed| E3["Status: needs_review\nFull Redaction Fallback"]
-        
-        E3 --> E4["IO / Admin: Review Queue\nGET /documents?status=needs_review"]
-        E4 --> E5["IO: POST /documents/:id/redact-tag\n(Human Correction)"]
-        E5 --> E2
-    end
+    P_LOGIN(["2.1.1 POST /auth/login<br/>Constant-time dummy bcrypt check"])
+    P_REFRESH(["2.1.2 POST /auth/refresh<br/>Exchange refresh token for access token"])
+    P_ME(["2.1.3 GET /auth/me<br/>Authoritative identity and permission profile"])
+    P_ROLE_MANAGE(["2.1.4 GET/POST /admin/roles<br/>Role definitions and custom role provisioning"])
+    P_ROLE_ASSIGN(["2.1.5 POST /admin/users/:id/role<br/>Assign role to government officer"])
 
-    subgraph S3["Stage 3: Parallel Requisitions & Bail Track"]
-        B3 --> F1["Authority Staff: GET /cases/:id/evidence-requests"]
-        F1 --> F2["Authority: POST /evidence-requests/:id/submit\n(Fulfill Requisition)"]
-        F2 --> F3["Request Status: completed\nEvidence Attached"]
+    T_USERS[("users<br/>email, hashed_password, role, org_id")]
+    T_ROLES[("roles & role_permissions<br/>code, name, is_system, permissions")]
+    T_ORGS[("organizations<br/>id, name, org_type")]
+    T_AUDIT[("audit_logs<br/>seq, action, actor_user_id, row_hash")]
 
-        A5 -.-> G1["Arrest Made: POST /cases/:id/bail/arrest\n(Status: Arrested)"]
-        G1 --> G2["Defense: POST /cases/:id/bail/application\n(Status: Application_Filed)"]
-        G2 --> G3["Court: POST /cases/:id/bail/hearing-notice\n(Status: Hearing_Scheduled)"]
-        G3 --> G4["Court: POST /cases/:id/bail/order\n(Status: Order_Issued / Denied_Final)"]
-        G4 -->|Granted| G5["Accused: POST /cases/:id/bail/surety\n(Status: Surety_Registered)"]
-    end
+    ClientUser -->|login_credentials| P_LOGIN
+    P_LOGIN -->|query_user_by_email| T_USERS
+    P_LOGIN -->|run_constant_time_dummy_if_not_found| P_LOGIN
+    P_LOGIN -->|return_15m_access_and_7d_refresh_jwt| ClientUser
 
-    subgraph S4["Stage 4: Charge Sheet AND-Join Gate"]
-        F3 & E2 --> H1["Prosecutor: POST /cases/:id/file-charge-sheet"]
-        H1 --> H2{"Mandatory Stage Requirements Met?\n(Docs + Evidence Requisitions)"}
-        H2 -->|Missing Items| H3["Reject: HTTP 409 Conflict\n(Returns missing item list)"]
-        H2 -->|All Fulfilled| H4["Case Status: Charge_Sheet_Filed"]
-    end
+    ClientUser -->|refresh_token_jwt| P_REFRESH
+    P_REFRESH -->|verify_expected_type_refresh| P_REFRESH
+    P_REFRESH -->|issue_new_access_token| ClientUser
 
-    subgraph S5["Stage 5: Judicial Trial & Final Disposition"]
-        H4 --> J1["Court: POST /cases/:id/trial/hearing-notice\n(Case Status: Trial)"]
-        J1 --> J2["Trial Hearings & Judicial Review\n(GET /documents/:id - Unredacted for Court)"]
-        J2 --> J3["Court: POST /cases/:id/judgment\n(Verdict: convicted / acquitted)"]
-        J3 --> J4["Case Status: Judgment\n(Terminal State)"]
-    end
+    ClientUser -->|bearer_access_jwt| P_ME
+    P_ME -->|fetch_user_and_permissions| T_USERS
+    T_USERS -->|joined_profile_and_permissions| P_ME
+    P_ME -->|return_authoritative_user_summary| ClientUser
 
-    subgraph S6["Stage 6: Oversight, Audit & NCRB Reporting"]
-        J4 --> K1["Records Analyst: GET /reports/case-metadata\n(De-Identified Crime Statistics)"]
-        ALL_ACTIONS["All Platform Mutations"] --> L1["PostgreSQL Hash Chain (models.AuditLog)"]
-        L1 --> L2["Security Auditor: GET /cases/:id/audit-log/ai-parser"]
-        L1 --> L3["Config Admin: GET /cases/:id/audit-log/chain-integrity"]
-    end
+    AdminUser -->|create_custom_role_payload| P_ROLE_MANAGE
+    P_ROLE_MANAGE -->|verify_config_admin_role| P_ROLE_MANAGE
+    P_ROLE_MANAGE -->|insert_custom_role_record| T_ROLES
+    P_ROLE_MANAGE -->|write_audit_log role_created| T_AUDIT
+
+    AdminUser -->|assign_user_role_payload| P_ROLE_ASSIGN
+    P_ROLE_ASSIGN -->|verify_config_admin_role| P_ROLE_ASSIGN
+    P_ROLE_ASSIGN -->|update_user_role| T_USERS
+    P_ROLE_ASSIGN -->|write_audit_log role_assigned| T_AUDIT
 ```
 
 ---
 
-## 5. Flow-by-Flow Technical Architecture Diagrams
-
-### Flow 1: Case Registration & Investigating Officer Handover
-Handles initial FIR intake, duty officer role gating, and atomic officer reassignment mid-case.
+### 3.2 DFD 2.2 — Case Intake, Assignment & Mid-Case IO Handover (`/cases`)
+* **Key Files:** [`api/app/routers/cases.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/cases.py), [`api/app/models.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/models.py), [`api/app/security.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/security.py), [`api/app/audit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/audit.py)
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor DutyOfficer as Duty Officer
-    actor SHO as Station House Officer (SHO)
-    actor OldIO as Old IO (IO 1)
-    actor NewIO as New IO (IO 2)
-    participant API as FastAPI Gateway
-    participant DB as PostgreSQL Database
-    participant Audit as Hash Chained AuditLog
+flowchart TB
+    DutyOfficer["👤 Duty Officer"]
+    SHO["👤 Station House Officer (SHO)"]
+    IO["👤 Investigating Officer (IO)"]
+    RestrictedUser["👤 Unassigned IO / Specialist"]
 
-    DutyOfficer->>API: POST /cases (crime_type, complaint_text)
-    API->>DB: INSERT INTO cases (status='FIR_Registered')
-    API->>Audit: write_audit_log(action='fir_registered')
-    API-->>DutyOfficer: 201 Created (case_id, FIR Number)
+    P_REGISTER(["2.2.1 POST /cases<br/>Register FIR and initiate docket"])
+    P_ASSIGN(["2.2.2 POST /cases/:id/assign-io<br/>Initial IO assignment"])
+    P_REASSIGN(["2.2.3 POST /cases/:id/reassign-io<br/>Mid-case IO handover and atomic swap"])
+    P_DIARY_ADD(["2.2.4 POST /cases/:id/case-diary<br/>Append Section 172 diary note"])
+    P_DIARY_LIST(["2.2.5 GET /cases/:id/case-diary<br/>Read investigation diary timeline"])
+    P_CASE_GET(["2.2.6 GET /cases/:id<br/>Case summary and linked resource docket"])
 
-    SHO->>API: POST /cases/:id/assign-io (io_user_id=IO1.id)
-    API->>DB: INSERT INTO case_assignments (case_id, io_user_id=IO1)
-    API->>Audit: write_audit_log(action='io_assigned')
-    API-->>SHO: 200 OK (Assignment confirmed)
+    T_CASES[("cases<br/>id, case_number, crime_type, status")]
+    T_ASSIGN[("case_assignments<br/>case_id, io_user_id, assigned_at")]
+    T_DIARY[("case_diary_entries<br/>id, case_id, author_user_id, entry_text")]
+    T_AUDIT[("audit_logs<br/>action: fir_registered, io_reassigned")]
 
-    Note over OldIO,API: IO 1 has active read/write case access
+    DutyOfficer -->|fir_registration_payload| P_REGISTER
+    P_REGISTER -->|insert_case_record| T_CASES
+    P_REGISTER -->|write_audit_log fir_registered| T_AUDIT
+    P_REGISTER -->|return_case_summary| DutyOfficer
 
-    Note over SHO,NewIO: Mid-Case Reassignment Event (Flow 1 Hardened)
-    SHO->>API: POST /cases/:id/reassign-io (new_io_user_id=IO2.id, reason="Transfer")
-    Note over API: Precondition Checks:<br/>1. UUID Valid?<br/>2. Case not in Judgment/Disposed?<br/>3. Target user role == 'io'?<br/>4. Active assignment exists?<br/>5. Target IO != Current IO?
-    API->>DB: BEGIN TRANSACTION
-    API->>DB: DELETE FROM case_assignments WHERE case_id=:id
-    API->>DB: INSERT INTO case_assignments (case_id, io_user_id=IO2)
-    API->>Audit: write_audit_log(action='io_reassigned', metadata={prev: IO1, new: IO2, reason: "Transfer"})
-    API->>DB: COMMIT TRANSACTION
-    API-->>SHO: 200 OK (Reassignment Response)
+    SHO -->|assign_io_payload| P_ASSIGN
+    P_ASSIGN -->|insert_case_assignment| T_ASSIGN
+    P_ASSIGN -->|write_audit_log io_assigned| T_AUDIT
+    P_ASSIGN -->|return_assignment_confirmed| SHO
 
-    OldIO->>API: GET /cases/:id
-    API-->>OldIO: 403 Forbidden (Assignment Revoked)
+    SHO -->|reassign_io_payload_with_reason| P_REASSIGN
+    P_REASSIGN -->|verify_preconditions_uuid_and_active_io| T_ASSIGN
+    P_REASSIGN -->|verify_case_not_in_judgment| T_CASES
+    P_REASSIGN -->|atomic_delete_old_assignment| T_ASSIGN
+    P_REASSIGN -->|atomic_insert_new_assignment| T_ASSIGN
+    P_REASSIGN -->|write_audit_log io_reassigned_with_ids_and_reason| T_AUDIT
+    P_REASSIGN -->|return_reassign_summary| SHO
 
-    NewIO->>API: GET /cases/:id
-    API-->>NewIO: 200 OK (Full Access Granted)
+    IO -->|append_diary_note_payload| P_DIARY_ADD
+    P_DIARY_ADD -->|verify_assigned_io_or_sho| T_ASSIGN
+    P_DIARY_ADD -->|insert_append_only_diary_row| T_DIARY
+    P_DIARY_ADD -->|write_audit_log case_diary_appended_zero_pii| T_AUDIT
+
+    RestrictedUser -->|read_case_or_diary_request| P_CASE_GET
+    P_CASE_GET -->|assert_case_access_check_assignment| T_ASSIGN
+    P_CASE_GET -->|reject_with_403_if_unassigned| RestrictedUser
+    P_CASE_GET -->|return_case_summary_if_permitted| IO
 ```
 
 ---
 
-### Flow 2: Dual-Track Ingestion Pipeline & Redaction Engine
-Handles secure upload, MIME sniffing, dual-track asynchronous processing, review queue fallback, and role-masked read projections.
+### 3.3 DFD 2.3 — Document Ingestion, Native MIME Sniffing & Storage (`/documents` Upload)
+* **Key Files:** [`api/app/routers/documents.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/documents.py), [`api/app/upload_validator.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/upload_validator.py), [`api/app/storage.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/storage.py), [`api/app/queue.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/queue.py)
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Officer as Uploading Officer
-    participant API as FastAPI Ingestion Gateway
-    participant Sniffer as Native MIME Sniffer
-    participant S3 as MinIO (S3 Storage)
-    participant Queue as Redis / Celery
-    participant OCR as OCR Worker (Track B)
-    participant AI as AI Parser (Track B)
-    participant Chain as Chain Worker (Track A)
-    participant DB as PostgreSQL
-    actor Reader as Reading Role (Specialist / Court)
+flowchart TB
+    Officer["👤 Permitted Officer / Authority"]
 
-    Officer->>API: POST /documents (case_id, doc_type, file)
-    API->>Sniffer: Sniff initial 8KB chunk (libmagic / magic bytes)
-    alt Invalid MIME Type or Exceeds 50MB
-        Sniffer-->>API: Rejected
-        API-->>Officer: 415 Unsupported Media Type / 413 Payload Too Large
-    else Valid Media Type
-        API->>S3: Stream to s3://legadoc-documents/{org}/{case}/{doc}/v1
-        API->>DB: INSERT INTO documents (status='processing', chain_status='pending')
-        API->>Queue: Enqueue Track A: chain_worker.write_hash(doc_id, key='{id}:v1')
-        API->>Queue: Enqueue Track B: ocr_worker.extract_document(doc_id)
-        API-->>Officer: 202 Accepted (Document id, status='processing')
-    end
+    P_SNIFF(["2.3.1 Stream Sniff & Deduplicate<br/>8KB chunk, native magic bytes, SHA-256"])
+    P_STORAGE_PUT(["2.3.2 Write to Object Storage<br/>MinIO S3 bucket, SSE-S3 AES-256"])
+    P_META_INSERT(["2.3.3 Insert Document Record<br/>status: processing, chain: pending"])
+    P_DISPATCH(["2.3.4 Enqueue Dual Celery Tracks<br/>Track A: Chain Worker, Track B: OCR Worker"])
 
-    par Asynchronous Track A: Blockchain Write
-        Queue->>Chain: Process write_hash job
-        Chain->>DB: Check idempotency key
-        Chain->>Fabric: Submit signed transaction (SHA-256 hash)
-        Chain->>DB: UPDATE documents SET chain_status='confirmed'
-        Chain->>DB: write_audit_log(action='chain_write_confirmed')
-    and Asynchronous Track B: OCR & Redaction Tagging
-        Queue->>OCR: Process extract_document job
-        OCR->>S3: Read raw document file
-        OCR->>OCR: Execute PaddleOCR extraction
-        OCR->>DB: UPDATE documents SET raw_text=:text
-        OCR->>Queue: Enqueue ai_parser_worker.tag_document(doc_id)
-        Queue->>AI: Process tag_document job
-        AI->>AI: Run Presidio + spaCy NER against field schema
-        AI->>DB: INSERT INTO document_sensitivity_tags (PERSON, PHONE, AADHAAR, ...)
-        alt Any Tag Confidence < 70% or Worker Error
-            AI->>DB: UPDATE documents SET status='needs_review'
-            Note over AI,DB: Fail-Closed: Falls back to full redaction
-        else All Tags Confident (>= 70%)
-            AI->>DB: UPDATE documents SET status='ready'
-        end
-        AI->>DB: write_audit_log(action='auto_tag_completed')
-    end
+    T_CASES[("cases<br/>target case verification")]
+    T_DOCS[("documents<br/>id, case_id, doc_type, version, doc_hash")]
+    D_MINIO[("MinIO S3 Bucket<br/>legadoc-documents/{org}/{case}/{doc}/v{ver}")]
+    D_REDIS_QUEUE[("Redis Celery Queue<br/>ocr_worker, chain_worker")]
+    T_AUDIT[("audit_logs<br/>action: document_uploaded")]
 
-    Note over Reader,API: Read-Time Dynamic Masking (app/redaction.py)
-    Reader->>API: GET /documents/:id
-    API->>DB: Verify assert_case_access(claims)
-    API->>DB: Fetch Document + DocumentSensitivityTag rows
-    API->>API: get_document_view(role, tags, raw_text)
-    alt Reader is Full Access (IO, SHO, Court, Config Admin)
-        API-->>Reader: 200 OK with unredacted raw_text
-    else Reader is Restricted (Cyber Cell Specialist, Prosecutor, Defense)
-        API-->>Reader: 200 OK with masked text: "[REDACTED:PERSON], call [REDACTED:PHONE_NUMBER]"
-    end
+    Officer -->|multipart_file_and_case_id| P_SNIFF
+    P_SNIFF -->|verify_caller_case_access| T_CASES
+    P_SNIFF -->|calculate_sha256_digest| P_SNIFF
+    P_SNIFF -->|check_existing_hash_for_deduplication| T_DOCS
+    P_SNIFF -->|reject_if_disguised_executable_415| Officer
+    P_SNIFF -->|reject_if_exceeds_50mb_413| Officer
+
+    P_SNIFF -->|verified_binary_stream| P_STORAGE_PUT
+    P_STORAGE_PUT -->|put_object_with_encryption| D_MINIO
+
+    P_STORAGE_PUT -->|storage_path_and_hash| P_META_INSERT
+    P_META_INSERT -->|insert_document_row_v1| T_DOCS
+    P_META_INSERT -->|write_audit_log document_uploaded| T_AUDIT
+
+    P_META_INSERT -->|doc_id_and_idempotency_key| P_DISPATCH
+    P_DISPATCH -->|enqueue chain_worker.write_hash| D_REDIS_QUEUE
+    P_DISPATCH -->|enqueue ocr_worker.extract_document| D_REDIS_QUEUE
+    P_DISPATCH -->|return_202_accepted_with_processing_status| Officer
 ```
 
 ---
 
-### Flow 3: Section 91 Parallel Evidence Requisitions & Charge Sheet AND-Join
-Orchestrates multi-tenant requests to external authorities (FSL Labs, Hospitals, Banks, Telecoms) and enforces the mandatory pre-condition checklist before filing a charge sheet.
+### 3.4 DFD 2.4 — Dual-Track Processing, Review Queue & Redaction Engine (`workers/*`, `/documents`)
+* **Key Files:** [`workers/ocr_worker/worker.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/workers/ocr_worker/worker.py), [`workers/ai_parser_worker/worker.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/workers/ai_parser_worker/worker.py), [`workers/chain_worker/worker.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/workers/chain_worker/worker.py), [`api/app/redaction.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/redaction.py), [`api/app/routers/documents.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/documents.py)
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor IO as Investigating Officer
-    actor FSL as Forensic Lab (Authority Staff)
-    actor Prosecutor as Public Prosecutor
-    participant API as FastAPI Gateway
-    participant DB as PostgreSQL
-    participant Audit as Hash Chained AuditLog
+flowchart TB
+    RedisQueue["⚡ Redis / Celery Task Broker"]
+    FabricNetwork["⛓️ Hyperledger Fabric Network"]
+    IOUser["👤 Investigating Officer (IO)"]
+    AdminUser["👤 Config Admin"]
+    ReaderUser["👤 Reading Role (Specialist / Court)"]
 
-    IO->>API: POST /cases/:id/evidence-requests (requested_org_id=FSL.id, doc_type="Forensic Report")
-    API->>DB: INSERT INTO evidence_requests (status='pending', requested_org_id=FSL)
-    API->>Audit: write_audit_log(action='evidence_requested')
-    API-->>IO: 201 Created (Request id)
+    P_CHAIN_EXEC(["2.4.1 Chain Worker: process_hash_write<br/>Idempotent Fabric anchor & status update"])
+    P_OCR_EXEC(["2.4.2 OCR Worker: extract_document<br/>Fetch S3 blob, run PaddleOCR, store raw_text"])
+    P_AI_EXEC(["2.4.3 AI Parser: tag_document<br/>Presidio NER, tag spans, check 70% threshold"])
+    P_REVIEW_QUEUE(["2.4.4 GET /documents?status=needs_review<br/>Scoped queue, structural PII exclusion"])
+    P_HUMAN_CORRECT(["2.4.5 POST /documents/:id/redact-tag<br/>Officer manual override, extend hash chain"])
+    P_READ_VIEW(["2.4.6 GET /documents/:id<br/>app/redaction.py dynamic span masking"])
 
-    Note over FSL,API: Strict Multi-Tenant Scoping (Default-Deny)
-    FSL->>API: GET /cases/:id/evidence-requests
-    API->>DB: Filter WHERE requested_org_id == claims['org_id']
-    API-->>FSL: 200 OK (Lists only requests routed to FSL)
+    D_MINIO[("MinIO S3 Storage<br/>raw document file")]
+    T_DOCS[("documents<br/>status, chain_status, raw_text")]
+    T_TAGS[("document_sensitivity_tags<br/>entity_type, span_start, span_end, confidence")]
+    T_AUDIT[("audit_logs<br/>auto_tag_completed, redact_tag_correction")]
 
-    FSL->>API: POST /evidence-requests/:id/submit (file=ballistics.pdf)
-    API->>API: verify_evidence_request_org_access(claims)
-    Note over API: Security Rule (Issue #24 Fixed):<br/>Only matching authority_staff or admin permitted.<br/>Defense or unauthorized roles receive 403 Forbidden.
-    API->>DB: Store evidence document & UPDATE evidence_requests SET status='completed'
-    API->>Audit: write_audit_log(action='evidence_request_fulfilled')
-    API-->>FSL: 200 OK (Completed)
+    RedisQueue -->|dequeue chain_worker task| P_CHAIN_EXEC
+    P_CHAIN_EXEC -->|submit_sha256_hash_transaction| FabricNetwork
+    FabricNetwork -->|transaction_confirmed_id| P_CHAIN_EXEC
+    P_CHAIN_EXEC -->|update_chain_status_confirmed| T_DOCS
+    P_CHAIN_EXEC -->|write_audit_log chain_write_confirmed| T_AUDIT
 
-    Note over Prosecutor,API: Section 173 Charge Sheet AND-Join Gate
-    Prosecutor->>API: POST /cases/:id/file-charge-sheet
-    API->>DB: Query stage_requirements WHERE crime_type=case.crime_type AND stage='Charge_Sheet'
-    API->>DB: Check: 1. All mandatory doc_types uploaded?<br/>2. All mandatory evidence_requests completed?
-    alt Any Mandatory Document or Requisition Incomplete
-        API-->>Prosecutor: 409 Conflict (detail: {"missing_docs": [...], "missing_evidence": [...]})
-    else All Stage Requirements Satisfied
-        API->>DB: UPDATE cases SET investigation_status='Charge_Sheet_Filed'
-        API->>Audit: write_audit_log(action='charge_sheet_filed')
-        API-->>Prosecutor: 200 OK (Status transitioned to Charge_Sheet_Filed)
-    end
+    RedisQueue -->|dequeue ocr_worker task| P_OCR_EXEC
+    P_OCR_EXEC -->|read_raw_bytes| D_MINIO
+    P_OCR_EXEC -->|execute_ocr_and_store_text| T_DOCS
+    P_OCR_EXEC -->|enqueue ai_parser_worker task| RedisQueue
+
+    RedisQueue -->|dequeue ai_parser_worker task| P_AI_EXEC
+    T_DOCS -->|read_raw_text| P_AI_EXEC
+    P_AI_EXEC -->|write_detected_entity_tags| T_TAGS
+    P_AI_EXEC -->|write_audit_log auto_tag_completed| T_AUDIT
+    P_AI_EXEC -->|if_confidence_below_70_set_status_needs_review| T_DOCS
+    P_AI_EXEC -->|if_confident_set_status_ready| T_DOCS
+
+    IOUser -->|request_review_queue| P_REVIEW_QUEUE
+    AdminUser -->|request_global_review_queue| P_REVIEW_QUEUE
+    P_REVIEW_QUEUE -->|query_documents_status_needs_review| T_DOCS
+    P_REVIEW_QUEUE -->|exclude_raw_text_and_storage_keys| P_REVIEW_QUEUE
+    P_REVIEW_QUEUE -->|return_document_review_item_list| IOUser
+
+    IOUser -->|submit_human_correction_tag| P_HUMAN_CORRECT
+    P_HUMAN_CORRECT -->|insert_tag_source_human_correction| T_TAGS
+    P_HUMAN_CORRECT -->|update_document_status_ready| T_DOCS
+    P_HUMAN_CORRECT -->|write_audit_log redact_tag_correction| T_AUDIT
+
+    ReaderUser -->|fetch_document_content| P_READ_VIEW
+    P_READ_VIEW -->|verify_case_access| T_DOCS
+    P_READ_VIEW -->|fetch_sensitivity_tags| T_TAGS
+    P_READ_VIEW -->|if_full_access_role_return_unredacted| ReaderUser
+    P_READ_VIEW -->|if_restricted_role_return_masked_spans| ReaderUser
 ```
 
 ---
 
-### Flow 4: Independent Bail Finite State Machine (FSM)
-Decoupled concurrent bail track operating in parallel with the main investigation docket.
+### 3.5 DFD 2.5 — Section 91 Requisitions & Charge Sheet AND-Join Gate (`/evidence-requests`, `/cases`)
+* **Key Files:** [`api/app/routers/evidence_requests.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/evidence_requests.py), [`api/app/security.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/security.py), [`api/app/audit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/audit.py), [`api/app/models.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/models.py)
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Arrested: POST /cases/:id/bail/arrest\n(IO / Duty Officer)
-    
-    Arrested --> Application_Filed: POST /cases/:id/bail/application\n(Defense Submission-Only)
-    
-    Application_Filed --> Hearing_Scheduled: POST /cases/:id/bail/hearing-notice\n(Court)
-    
-    Hearing_Scheduled --> Order_Issued: POST /cases/:id/bail/order [Bail Granted]\n(Court)
-    Hearing_Scheduled --> Denied_Final: POST /cases/:id/bail/order [Bail Denied]\n(Court)
-    
-    Order_Issued --> Surety_Registered: POST /cases/:id/bail/surety\n(Accused / Defense Submission-Only)
-    
-    Surety_Registered --> [*]: Accused Released on Bail
-    Denied_Final --> [*]: Accused Remains in Judicial Custody
+flowchart TB
+    IOUser["👤 Investigating Officer (IO)"]
+    AuthorityStaff["🏛️ External Authority Staff"]
+    Intruder["👤 Unauthorized Role (Defense / Civilian)"]
+    Prosecutor["⚖️ Public Prosecutor"]
 
-    note right of Arrested
-        Invariants:
-        - FSM transitions are strictly sequential.
-        - Out-of-order calls return HTTP 400 Bad Request.
-        - Operating bail status does NOT mutate case.investigation_status.
-        - Every transition appends an immutable row to AuditLog.
-    end note
+    P_REQ_CREATE(["2.5.1 POST /cases/:id/evidence-requests<br/>Dispatch requisition to FSL, Hospital, Bank"])
+    P_REQ_LIST(["2.5.2 GET /cases/:id/evidence-requests<br/>Multi-tenant scoped listing"])
+    P_REQ_SUBMIT(["2.5.3 POST /evidence-requests/:id/submit<br/>Default-deny gate & single-fulfillment upload"])
+    P_CHARGE_SHEET(["2.5.4 POST /cases/:id/file-charge-sheet<br/>Section 173 AND-Join checklist evaluation"])
+
+    T_CASES[("cases<br/>investigation_status, crime_type")]
+    T_REQ[("evidence_requests<br/>case_id, requested_org_id, status")]
+    T_STAGE_REQ[("stage_requirements<br/>crime_type, stage, required_type")]
+    T_DOCS[("documents<br/>verified evidence uploads")]
+    T_AUDIT[("audit_logs<br/>evidence_requested, charge_sheet_filed")]
+
+    IOUser -->|create_requisition_payload| P_REQ_CREATE
+    P_REQ_CREATE -->|verify_assigned_io| P_REQ_CREATE
+    P_REQ_CREATE -->|insert_evidence_request_status_pending| T_REQ
+    P_REQ_CREATE -->|write_audit_log evidence_requested| T_AUDIT
+    P_REQ_CREATE -->|return_201_created_requisition| IOUser
+
+    AuthorityStaff -->|list_requests_query| P_REQ_LIST
+    P_REQ_LIST -->|filter_by_requested_org_id| T_REQ
+    P_REQ_LIST -->|return_org_scoped_requests| AuthorityStaff
+
+    Intruder -->|attempt_evidence_submission| P_REQ_SUBMIT
+    P_REQ_SUBMIT -->|verify_evidence_request_org_access| P_REQ_SUBMIT
+    P_REQ_SUBMIT -->|reject_with_403_forbidden_default_deny| Intruder
+
+    AuthorityStaff -->|submit_certified_evidence_multipart| P_REQ_SUBMIT
+    P_REQ_SUBMIT -->|verify_request_is_not_already_completed| T_REQ
+    P_REQ_SUBMIT -->|insert_evidence_document| T_DOCS
+    P_REQ_SUBMIT -->|update_request_status_completed| T_REQ
+    P_REQ_SUBMIT -->|write_audit_log evidence_request_fulfilled| T_AUDIT
+    P_REQ_SUBMIT -->|return_200_ok_completed| AuthorityStaff
+
+    Prosecutor -->|file_charge_sheet_attempt| P_CHARGE_SHEET
+    P_CHARGE_SHEET -->|fetch_mandatory_checklist_for_crime| T_STAGE_REQ
+    P_CHARGE_SHEET -->|verify_all_required_docs_uploaded| T_DOCS
+    P_CHARGE_SHEET -->|verify_all_required_evidence_completed| T_REQ
+    P_CHARGE_SHEET -->|reject_with_409_if_any_item_missing| Prosecutor
+    P_CHARGE_SHEET -->|update_status_charge_sheet_filed| T_CASES
+    P_CHARGE_SHEET -->|write_audit_log charge_sheet_filed| T_AUDIT
+    P_CHARGE_SHEET -->|return_200_ok_transition_successful| Prosecutor
 ```
 
 ---
 
-### Flow 5: Judicial Trial & Court Disposition
-Gated by the Charge Sheet AND-Join gate, moving the docket to public trial, judicial review, and terminal verdict.
+### 3.6 DFD 2.6 — Decoupled Bail FSM & Judicial Trial Disposition (`/bail`, `/trial`)
+* **Key Files:** [`api/app/routers/bail.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/bail.py), [`api/app/routers/trial.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/trial.py), [`api/app/models.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/models.py), [`api/app/audit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/audit.py)
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Prosecutor as Public Prosecutor
-    actor Court as Judiciary / Judge
-    participant API as FastAPI Gateway
-    participant DB as PostgreSQL
-    participant Audit as Hash Chained AuditLog
+flowchart TB
+    IOUser["👤 Investigating Officer (IO)"]
+    DefenseUser["🛡️ Defense Counsel (Submission-Only)"]
+    CourtUser["⚖️ Judiciary / Judge"]
+    AccusedUser["👤 Accused / Surety"]
 
-    Note over Prosecutor,Court: Pre-condition: Case Status must be 'Charge_Sheet_Filed'
-    Court->>API: POST /cases/:id/trial/hearing-notice (hearing_date, courtroom)
-    API->>DB: Check investigation_status == 'Charge_Sheet_Filed'
-    API->>DB: UPDATE cases SET investigation_status='Trial'
-    API->>Audit: write_audit_log(action='trial_hearing_scheduled')
-    API-->>Court: 200 OK (Trial Notice Issued, status: 'Trial')
+    P_ARREST(["2.6.1 POST /cases/:id/bail/arrest<br/>Record suspect arrest and start bail FSM"])
+    P_BAIL_APP(["2.6.2 POST /cases/:id/bail/application<br/>File Section 437/439 CrPC bail petition"])
+    P_BAIL_HEARING(["2.6.3 POST /cases/:id/bail/hearing-notice<br/>Court schedule bail hearing"])
+    P_BAIL_ORDER(["2.6.4 POST /cases/:id/bail/order<br/>Pronounce bail grant or final denial"])
+    P_BAIL_SURETY(["2.6.5 POST /cases/:id/bail/surety<br/>Register monetary/property surety bond"])
+    P_TRIAL_NOTICE(["2.6.6 POST /cases/:id/trial/hearing-notice<br/>Transition to Trial (Charge Sheet prerequisite)"])
+    P_JUDGMENT(["2.6.7 POST /cases/:id/judgment<br/>Record final verdict: convicted or acquitted"])
 
-    Note over Court,API: Judicial Evidence Review
-    Court->>API: GET /documents/:id
-    Note over API: Court role has full_access privileges.<br/>Receives unredacted evidence + complete chain verification.
-    API-->>Court: 200 OK (Unredacted Document with verification badge)
+    T_CASES[("cases<br/>investigation_status, bail_status")]
+    T_AUDIT[("audit_logs<br/>action: bail_*, trial_*, judgment_pronounced")]
 
-    Note over Court,API: Final Verdict Disposition
-    Court->>API: POST /cases/:id/judgment (verdict='convicted', judgment_summary='...')
-    API->>API: Validate verdict in {'acquitted', 'convicted'}
-    API->>DB: UPDATE cases SET investigation_status='Judgment', bail_status='Disposed'
-    API->>Audit: write_audit_log(action='judgment_pronounced', metadata={verdict: 'convicted'})
-    API-->>Court: 200 OK (Case Terminal State Reached)
+    IOUser -->|arrest_record_payload| P_ARREST
+    P_ARREST -->|transition_bail_status_arrested| T_CASES
+    P_ARREST -->|write_audit_log bail_arrest_recorded| T_AUDIT
+
+    DefenseUser -->|bail_petition_payload| P_BAIL_APP
+    P_BAIL_APP -->|verify_status_is_arrested_400_if_not| T_CASES
+    P_BAIL_APP -->|transition_bail_status_application_filed| T_CASES
+    P_BAIL_APP -->|write_audit_log bail_application_filed| T_AUDIT
+
+    CourtUser -->|hearing_schedule_payload| P_BAIL_HEARING
+    P_BAIL_HEARING -->|transition_bail_status_hearing_scheduled| T_CASES
+    P_BAIL_HEARING -->|write_audit_log bail_hearing_scheduled| T_AUDIT
+
+    CourtUser -->|bail_decision_payload| P_BAIL_ORDER
+    P_BAIL_ORDER -->|if_granted_transition_order_issued| T_CASES
+    P_BAIL_ORDER -->|if_denied_transition_denied_final| T_CASES
+    P_BAIL_ORDER -->|write_audit_log bail_order_issued| T_AUDIT
+
+    AccusedUser -->|surety_bond_payload| P_BAIL_SURETY
+    P_BAIL_SURETY -->|verify_status_is_order_issued| T_CASES
+    P_BAIL_SURETY -->|transition_bail_status_surety_registered| T_CASES
+    P_BAIL_SURETY -->|write_audit_log bail_surety_registered| T_AUDIT
+
+    CourtUser -->|trial_hearing_payload| P_TRIAL_NOTICE
+    P_TRIAL_NOTICE -->|verify_case_status_is_charge_sheet_filed| T_CASES
+    P_TRIAL_NOTICE -->|transition_investigation_status_trial| T_CASES
+    P_TRIAL_NOTICE -->|write_audit_log trial_hearing_scheduled| T_AUDIT
+
+    CourtUser -->|verdict_payload_acquitted_or_convicted| P_JUDGMENT
+    P_JUDGMENT -->|transition_investigation_status_judgment| T_CASES
+    P_JUDGMENT -->|transition_bail_status_disposed| T_CASES
+    P_JUDGMENT -->|write_audit_log judgment_pronounced| T_AUDIT
 ```
 
 ---
 
-### Flow 6: Tamper-Evident Audit Trail & Meta-Audit
-Role-filtered audit views, anti-enumeration sliding-window rate limiting, and cryptographic chain verification using monotonic sequence counters.
+### 3.7 DFD 2.7 — Tamper-Evident Audit Trail & NCRB Crime Reporting (`/audit-log`, `/reports`)
+* **Key Files:** [`api/app/audit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/audit.py), [`api/app/routers/audit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/audit.py), [`api/app/routers/reports.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/routers/reports.py), [`api/app/rate_limit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/app/rate_limit.py)
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Auditor as Security Auditor
-    actor Admin as Config Admin
-    actor IO as Assigned IO
-    participant API as FastAPI Gateway
-    participant Limiter as In-Memory Rate Limiter
-    participant DB as PostgreSQL (Serialized Lock)
+flowchart TB
+    Auditor["👤 Security Auditor"]
+    ConfigAdmin["👤 Config Admin"]
+    IOUser["👤 Investigating Officer (IO)"]
+    NCRBAnalyst["📊 NCRB Analyst"]
+    Intruder["👤 Unauthorized Role"]
 
-    Note over Auditor,API: Domain 8 Inspection: GET /cases/:id/audit-log/ai-parser
-    Auditor->>API: GET /cases/:id/audit-log/ai-parser
-    API->>Limiter: Check user limit (20 req/min)
-    alt Exceeded 20 requests in 60s
-        Limiter-->>API: Rejected
-        API-->>Auditor: 429 Too Many Requests (Retry-After: 60)
-    else Under Limit
-        API->>DB: BEGIN TRANSACTION
-        API->>DB: SELECT pg_advisory_xact_lock(267190)
-        API->>DB: INSERT INTO audit_logs (action='read_ai_parser_audit', actor=Auditor.id, seq=next_seq)
-        API->>DB: COMMIT TRANSACTION
-        API->>DB: SELECT * FROM audit_logs WHERE action IN ('auto_tag_completed', 'redact_tag_correction')
-        API-->>Auditor: 200 OK (Full auto-tag decisions, confidence scores, ZERO PII)
-    end
+    P_AUDIT_WRITE(["2.7.1 write_audit_log<br/>pg_advisory_xact_lock & monotonic seq increment"])
+    P_AUDIT_AI(["2.7.2 GET /cases/:id/audit-log/ai-parser<br/>Rate-limited 20/min, atomic write-on-read"])
+    P_AUDIT_CASE(["2.7.3 GET /cases/:id/audit-log<br/>Role-filtered envelopes: Full vs Summary"])
+    P_INTEGRITY(["2.7.4 GET /cases/:id/audit-log/chain-integrity<br/>Full cryptographic chain scan ordered by seq"])
+    P_NCRB_REPORT(["2.7.5 GET /reports/case-metadata<br/>De-identified crime analytics, zero PII"])
 
-    Note over Admin,API: Domain 8 Separation of Duties Check
-    Admin->>API: GET /cases/:id/audit-log/ai-parser
-    API-->>Admin: 403 Forbidden (Config Admin blocked from checking own redaction config)
+    T_AUDIT[("audit_logs<br/>id, seq, case_id, actor_user_id, action, prev_hash, row_hash")]
+    T_CASES[("cases<br/>case_number, crime_type, court_level, status")]
+    D_RATE_LIMIT[("Rate Limiter State<br/>sliding-window request timestamps")]
 
-    Note over IO,API: Operational Summary View: GET /cases/:id/audit-log
-    IO->>API: GET /cases/:id/audit-log
-    API->>DB: Fetch audit rows for case
-    API->>API: Filter to Summary Envelope (counts by action, timestamp bounds)
-    API-->>IO: 200 OK (Summary Response: "3 auto_tag_completed, 1 redact_tag_correction", chain_intact: true)
+    P_AUDIT_WRITE -->|acquire_pg_advisory_lock_267190| P_AUDIT_WRITE
+    P_AUDIT_WRITE -->|read_last_row_by_seq_desc| T_AUDIT
+    P_AUDIT_WRITE -->|assign_monotonic_seq_and_sha256_hash| P_AUDIT_WRITE
+    P_AUDIT_WRITE -->|insert_immutable_audit_row| T_AUDIT
 
-    Note over Admin,API: Cryptographic Tamper Verification: GET /cases/:id/audit-log/chain-integrity
-    Admin->>API: GET /cases/:id/audit-log/chain-integrity
-    API->>DB: SELECT * FROM audit_logs ORDER BY seq ASC
-    API->>API: Verify: row_hash == sha256(prev_hash + row_content) AND prev_hash == prev_row.row_hash
-    API-->>Admin: 200 OK (chain_intact: true, total_entries: N, latest_hash: "...")
+    Auditor -->|inspect_ai_parser_log_request| P_AUDIT_AI
+    P_AUDIT_AI -->|check_sliding_window_limit| D_RATE_LIMIT
+    P_AUDIT_AI -->|reject_if_exceeds_20_per_min_429| Auditor
+    P_AUDIT_AI -->|atomic_insert_read_ai_parser_audit_row| T_AUDIT
+    P_AUDIT_AI -->|return_tag_decisions_and_spans_zero_pii| Auditor
+
+    ConfigAdmin -->|attempt_ai_parser_read| P_AUDIT_AI
+    P_AUDIT_AI -->|reject_config_admin_with_403_separation_of_duties| ConfigAdmin
+
+    IOUser -->|read_case_audit_log_request| P_AUDIT_CASE
+    P_AUDIT_CASE -->|filter_to_operational_summary_envelope| IOUser
+
+    ConfigAdmin -->|run_chain_integrity_verification| P_INTEGRITY
+    P_INTEGRITY -->|read_all_rows_ordered_by_seq_asc| T_AUDIT
+    P_INTEGRITY -->|recompute_sha256_hash_and_prev_hash_matches| P_INTEGRITY
+    P_INTEGRITY -->|return_chain_intact_true_and_entry_count| ConfigAdmin
+
+    Intruder -->|attempt_ncrb_report_access| P_NCRB_REPORT
+    P_NCRB_REPORT -->|reject_unauthorized_with_403| Intruder
+
+    NCRBAnalyst -->|filtered_case_metadata_request| P_NCRB_REPORT
+    P_NCRB_REPORT -->|project_only_non_pii_columns| T_CASES
+    P_NCRB_REPORT -->|write_audit_log ncrb_report_generated| T_AUDIT
+    P_NCRB_REPORT -->|return_deidentified_case_metadata_list| NCRBAnalyst
 ```
 
 ---
 
-### Flow 7: Domain 7 NCRB De-Identified Crime Reporting
-Supplies anonymized, structural crime metadata for national records and policy analysis without identity exposure.
+## 4. State Ownership & Invariant Matrix
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Analyst as Records / NCRB Analyst
-    actor Intruder as Unauthorized Role (IO / SHO / Defense)
-    participant API as FastAPI Gateway
-    participant DB as PostgreSQL
-    participant Audit as Hash Chained AuditLog
-
-    Intruder->>API: GET /reports/case-metadata
-    API-->>Intruder: 403 Forbidden (Role not permitted)
-
-    Analyst->>API: GET /reports/case-metadata?crime_type=Theft&limit=100
-    API->>API: Validate pagination bounds (limit 1..500, offset >= 0)
-    API->>DB: SELECT id, case_number, crime_type, court_level, investigation_status, bail_status, created_at FROM cases
-    Note over API,DB: Structural Projection: ZERO user IDs, officer names, raw text, or organizations
-    API->>Audit: write_audit_log(action='ncrb_report_generated', metadata={filters})
-    API-->>Analyst: 200 OK (List of CaseMetadataDeidentified objects)
-```
-
----
-
-## 6. State Ownership & Invariant Map
-
-| Resource / State | Master Table | Access Control Rule | Mutability | Cryptographic Anchor |
+| Domain / Resource | Master Table | Authorization Model | Immutability Invariant | Tamper-Evident Proof |
 |:---|:---|:---|:---|:---|
-| **Case Docket** | `cases` | `assert_case_access()` | Mutable (`investigation_status`, `bail_status`) | Referenced in `AuditLog.case_id` |
-| **Case Assignment** | `case_assignments` | Only `sho` & `config_admin` | Single active IO per case. Replaced atomically on reassignment | `AuditLog(action='io_reassigned')` |
-| **Case Diary** | `case_diary_entries` | Strictly assigned IO and SHO | **Append-Only** (no edits, no deletions) | Row hash + `AuditLog(action='case_diary_appended')` |
-| **Evidence Requisition** | `evidence_requests` | IO (create), Assigned Authority (fulfill) | Single-fulfillment guard (`status='completed'`) | Document link + `AuditLog` |
-| **Evidence Document** | `documents` | Role-filtered via `app/redaction.py` | **Append-Only** versions (`v1, v2, ...`). Storage immutable | SHA-256 in MinIO + Fabric Blockchain (`chain_tx_id`) |
-| **Sensitivity Tags** | `document_sensitivity_tags` | Internal AI Parser + IO Corrections | Append-only. Never stores raw matched text | `AuditLog(action='auto_tag' \| 'redact_tag_correction')` |
-| **Bail Lifecycle** | `cases.bail_status` | Role-gated by state (IO, Defense, Court, Accused) | Strict 5-state Finite State Machine transitions | `AuditLog(action='bail_*')` |
-| **Trial Lifecycle** | `cases.investigation_status` | Gated by `Charge_Sheet_Filed` (Court only) | Sequential transitions (`Charge_Sheet` $\to$ `Trial` $\to$ `Judgment`) | `AuditLog(action='trial_*' \| 'judgment_pronounced')` |
-| **Audit Trail** | `audit_logs` | Security Auditor & Config Admin (Full), Others (Summary) | **Strictly Immutable & Append-Only** | Linked SHA-256 chain ordered by monotonic `seq` |
+| **Identity & Sessions** | `users`, `organizations` | `require_role()`, constant-time bcrypt | Password updates mutate hash; email immutable | Session JWT signatures (HMAC-SHA256) |
+| **Case Dockets** | `cases` | `assert_case_access()` | Mutable status (`investigation_status`, `bail_status`) | Tracked in `AuditLog.case_id` |
+| **Case Assignment** | `case_assignments` | Only `sho` and `config_admin` | Exactly one active IO per case. Atomic deletion & insertion | `AuditLog(action='io_reassigned')` |
+| **Investigation Diary**| `case_diary_entries` | Strictly assigned IO and SHO | **Append-Only** (no updates, no deletions) | Embedded in sequential audit hash chain |
+| **Evidence Requisition**| `evidence_requests` | IO (create), Requested Org (fulfill) | Single-fulfillment guard (`completed` $\to$ 409) | `AuditLog(action='evidence_request_fulfilled')` |
+| **Evidence Files** | `documents` | Role-filtered via `app/redaction.py` | **Append-Only** versions (`v1, v2, ...`). Storage immutable | SHA-256 in MinIO + Fabric Blockchain (`chain_tx_id`) |
+| **Sensitivity Tags** | `document_sensitivity_tags` | Internal AI Parser + IO Corrections | Append-only. Raw text NEVER stored in tags | `AuditLog(action='auto_tag_completed')` |
+| **Bail Lifecycle** | `cases.bail_status` | Role-gated state transitions | Strict 5-state sequential Finite State Machine | `AuditLog(action='bail_*')` |
+| **Trial Progression** | `cases.investigation_status` | Gated by `Charge_Sheet_Filed` (Court only) | Sequential forward progression (`Trial` $\to$ `Judgment`) | `AuditLog(action='trial_*' \| 'judgment_pronounced')` |
+| **Audit Trail** | `audit_logs` | Auditor/Admin (Full), Operational (Summary) | **Strictly Immutable & Append-Only** | Linked SHA-256 hash chain ordered by monotonic `seq` |
 
 ---
 
-## 7. Endpoint & Verification Matrix Reference
+## 5. Interface & Verification Contract (110 Tests Green)
 
-| Flow / Domain | Method | Endpoint Path | Role Allowed | Test Suite |
-|:---|:---:|:---|:---|:---|
-| **Auth** | `POST` | `/auth/login` | Public (Rate Limited) | `test_auth.py` |
-| **Auth** | `POST` | `/auth/refresh` | Authenticated Refresh Token | `test_auth.py` |
-| **Case Intake** | `POST` | `/cases` | `duty_officer` | `test_cases.py` |
-| **Case Assignment** | `POST` | `/cases/:id/assign-io` | `sho` | `test_cases.py` |
-| **Flow 1 (Reassign)** | `POST` | `/cases/:id/reassign-io` | `sho`, `config_admin` | `test_cases.py` (12 tests) |
-| **Case Diary** | `POST/GET`| `/cases/:id/case-diary` | `io`, `sho` (assigned) | `test_cases.py` |
-| **Flow 3 (Requisitions)**| `POST/GET`| `/cases/:id/evidence-requests` | `io`, matching `authority_staff` | `test_evidence_requests.py` |
-| **Flow 3 (Submit)** | `POST` | `/evidence-requests/:id/submit`| Matching `authority_staff` only | `test_evidence_requests.py` |
-| **Flow 3 (Charge Sheet)**| `POST` | `/cases/:id/file-charge-sheet` | `prosecutor` | `test_evidence_requests.py` |
-| **Flow 2 (Upload)** | `POST` | `/documents` | Case-permitted uploaders | `test_documents.py` |
-| **Flow 2 (Fetch)** | `GET` | `/documents/:id` | Role-scoped (`FULL` vs `MASKED`) | `test_documents.py` |
-| **Flow 2 (Versions)** | `GET` | `/documents/:id/versions` | Role-scoped | `test_documents.py` |
-| **Flow 2 (Queue)** | `GET` | `/documents?status=needs_review`| `config_admin`, `io` (assigned) | `test_documents.py` (9 tests) |
-| **Flow 2 (Human Tag)**| `POST` | `/documents/:id/redact-tag` | Assigned `io` | `test_documents.py` |
-| **Flow 4 (Bail FSM)** | `POST` | `/cases/:id/bail/*` (5 routes) | `io`, `defense`, `court`, `accused`| `test_bail.py` |
-| **Flow 5 (Trial)** | `POST` | `/cases/:id/trial/hearing-notice`| `court` | `test_trial.py` |
-| **Flow 5 (Judgment)** | `POST` | `/cases/:id/judgment` | `court` | `test_trial.py` |
-| **Flow 6 (Audit Trail)**| `GET` | `/cases/:id/audit-log` | Role-filtered (`full` vs `summary`)| `test_audit.py` |
-| **Flow 6 (AI Parser)** | `GET` | `/cases/:id/audit-log/ai-parser`| `security_auditor` ONLY | `test_audit.py` |
-| **Flow 6 (Integrity)**| `GET` | `/cases/:id/audit-log/chain-integrity`| `config_admin` | `test_audit.py`, `test_audit_chain_ordering.py` |
-| **Domain 7 (NCRB)** | `GET` | `/reports/case-metadata` | `records_ncrb_analyst` | `test_reports.py` (7 tests) |
-| **Full Lifecycle** | — | End-to-End Pipeline & Artifacts | Full operational matrix | `test_end_to_end_pipeline_flow_and_artifact_generation` |
-
----
-
-## 8. Summary for Team Meeting Presentation
-
-When presenting this architecture to Swayam, Abhinav, Rick, and Vinayak:
-1. **Zero Gaps in Core Pipeline**: All 7 flows are built, deployed in containers, and verified with 110 tests.
-2. **Deterministic Hash Chaining**: The latent microsecond timestamp bug has been solved upstream and downstream using monotonic `seq` indexing.
-3. **Fail-Closed Security**: Every single endpoint implements default-deny authorization (e.g. defense counsel blocked from forensics and case diary, unassigned IOs blocked from cross-case reads).
-4. **Clean Interfaces for Frontend & Workers**:
-   - Abhinav (Frontend) has exact, typed response schemas for the review queue, bail FSM, trial, and audit logs.
-   - Vinayak (AI Parser) has exact table targets (`DocumentSensitivityTag`) and status flags (`needs_review` on confidence < 70%).
+| Subsystem | Primary Endpoints | Roles Authorized | Test File | Test Count |
+|:---|:---|:---|:---|:---:|
+| **Auth & RBAC** | `POST /auth/login`<br/>`POST /auth/refresh`<br/>`GET /auth/me` | Public (Rate Limited)<br/>Any Authenticated | [`test_auth.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_auth.py)<br/>[`test_rbac_admin.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_rbac_admin.py) | 19 |
+| **Case & Assignment** | `POST /cases`<br/>`POST /cases/:id/assign-io`<br/>`POST /cases/:id/reassign-io`<br/>`POST /cases/:id/case-diary` | `duty_officer`<br/>`sho`<br/>`sho`, `config_admin`<br/>Assigned `io` | [`test_cases.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_cases.py) | 23 |
+| **Ingestion & Storage** | `POST /documents`<br/>`GET /documents/:id`<br/>`GET /documents/:id/versions`<br/>`POST /documents/:id/retry-chain-write` | Case-Permitted Roles<br/>Role-Scoped Redaction<br/>`config_admin` | [`test_documents.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_documents.py)<br/>[`test_chain_worker.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_chain_worker.py) | 29 |
+| **Review & Redaction** | `GET /documents?status=needs_review`<br/>`POST /documents/:id/redact-tag` | `config_admin`, Assigned `io`<br/>Assigned `io` | [`test_documents.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_documents.py) | (Included above) |
+| **Evidence & Gate** | `POST /cases/:id/evidence-requests`<br/>`POST /evidence-requests/:id/submit`<br/>`POST /cases/:id/file-charge-sheet` | Assigned `io`<br/>Matching `authority_staff`<br/>`prosecutor` | [`test_evidence_requests.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_evidence_requests.py) | 6 |
+| **Bail FSM & Trial** | `POST /cases/:id/bail/*` (5 states)<br/>`POST /cases/:id/trial/hearing-notice`<br/>`POST /cases/:id/judgment` | `io`, `defense`, `court`, `accused`<br/>`court`<br/>`court` | [`test_bail.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_bail.py)<br/>[`test_trial.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_trial.py) | 6 |
+| **Audit & Integrity** | `GET /cases/:id/audit-log`<br/>`GET /cases/:id/audit-log/ai-parser`<br/>`GET /cases/:id/audit-log/chain-integrity` | Role-Filtered<br/>`security_auditor` ONLY<br/>`config_admin` | [`test_audit.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_audit.py)<br/>[`test_audit_chain_ordering.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_audit_chain_ordering.py) | 20 |
+| **Domain 7 (NCRB)** | `GET /reports/case-metadata` | `records_ncrb_analyst` | [`test_reports.py`](file:///Users/kamalnasir/Desktop/SIH2026/LegaDoc/api/tests/test_reports.py) | 7 |
+| **TOTAL** | **All 33 Active Endpoints Verified** | **All Roles & Default-Deny Covered** | **Entire Test Suite in Docker** | **110 PASSED (100%)** |

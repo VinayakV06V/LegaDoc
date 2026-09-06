@@ -18,7 +18,7 @@ import pytest
 
 from app import models
 from app.audit import verify_chain_intact
-from tests.conftest import TestSessionLocal
+from tests.conftest import TestSessionLocal, auth_headers, login
 
 # Dynamically load ocr_worker and layout_reconstruction
 _ocr_worker_dir = (
@@ -256,8 +256,9 @@ def test_ocr_worker_fail_closed_on_empty_text_or_engine_crash(db_session, make_o
     assert document.status == "needs_review"
 
 
-def test_ocr_worker_to_ai_parser_handoff_e2e(db_session, make_org, make_user):
-    """End-to-end integration: OCR worker extracts layout text -> AI parser auto-tags PII."""
+def test_ocr_worker_to_ai_parser_handoff_e2e(client, db_session, make_org, make_user):
+    """End-to-end integration: OCR worker extracts layout text -> AI parser auto-tags PII ->
+    Assigned IO sees unredacted text -> Restricted role sees masked [REDACTED:PERSON]."""
     case, io_user, document = _create_test_document(db_session, make_org, make_user)
     raw_boxes = _load_delhi_test_boxes()
 
@@ -288,5 +289,60 @@ def test_ocr_worker_to_ai_parser_handoff_e2e(db_session, make_org, make_user):
     tags = db_session.query(models.DocumentSensitivityTag).filter_by(document_id=document.id).all()
     assert len(tags) >= 1
 
+    # 3. Assigned IO calls GET /documents/{id} -> sees full text
+    io_token = login(client, io_user.email, "pw").json()["access_token"]
+    io_resp = client.get(f"/documents/{document.id}", headers=auth_headers(io_token))
+    assert io_resp.status_code == 200
+    assert "80082511" in io_resp.json()["text"]
+
+    # 4. Restricted role (cyber_cell) on same case -> sees masked text
+    specialist = make_user("cyber_cell", email="cyber_spec@example.com", password="pw", org=io_user.organization)
+    db_session.add(models.CaseAssignment(case_id=case.id, io_user_id=specialist.id))
+    db_session.commit()
+
+    spec_token = login(client, "cyber_spec@example.com", "pw").json()["access_token"]
+    spec_resp = client.get(f"/documents/{document.id}", headers=auth_headers(spec_token))
+    assert spec_resp.status_code == 200
+    masked_text = spec_resp.json()["text"]
+    assert "[REDACTED:PERSON]" in masked_text
+
     # Verify audit chain integrity remains unbroken after both worker writes
+    assert verify_chain_intact(db_session) is True
+
+
+def test_ocr_pipeline_with_multilingual_haryana_fir(client, db_session, make_org, make_user):
+    """Verifies the complete flow with a bilingual Hindi/English FIR."""
+    case, io_user, document = _create_test_document(db_session, make_org, make_user)
+
+    haryana_boxes = [
+        {"box": [50, 20, 200, 40], "text": "District: Ambala / जिला: अम्बाला", "confidence": 0.95},
+        {"box": [300, 20, 500, 40], "text": "P.S.: Kotwali / थाना: कोतवाली", "confidence": 0.95},
+        {"box": [600, 20, 700, 40], "text": "Year: 2024 / वर्ष: 2024", "confidence": 0.95},
+        {"box": [50, 50, 300, 70], "text": "FIR No: 151 / प्रथम सूचना रिपोर्ट: 151", "confidence": 0.95},
+        {"box": [350, 50, 500, 70], "text": "Date: 12/05/2024 / दिनांक: 12/05/2024", "confidence": 0.95},
+        {"box": [50, 80, 400, 100], "text": "Acts & Sections: भा.दं.सं (IPC) 379, 411", "confidence": 0.95},
+        {"box": [50, 110, 450, 130], "text": "Complainant / शिकायतकर्ता: Ramesh Kumar s/o Sh. Ram Lal", "confidence": 0.95},
+        {"box": [50, 140, 350, 160], "text": "Address / पता: Model Town Ambala City", "confidence": 0.95},
+        {"box": [50, 170, 350, 190], "text": "Contact / फोन: 9876543210 Aadhaar 2345 6789 0123", "confidence": 0.95},
+    ]
+
+    # Run OCR worker
+    ocr_res = ocr_worker.process_extract_document(
+        str(document.id),
+        db=db_session,
+        mock_boxes=haryana_boxes,
+    )
+    assert ocr_res["status"] == "success"
+    assert ocr_res["fields"]["fir_number"] == "151"
+
+    # Run AI Parser
+    ai_status = ai_worker.process_tag_document(str(document.id), db=db_session)
+    assert ai_status == "ready"
+
+    # Verify tags created for phone, aadhaar, person
+    tags = db_session.query(models.DocumentSensitivityTag).filter_by(document_id=document.id).all()
+    entity_types = {t.entity_type for t in tags}
+    assert "PHONE_NUMBER" in entity_types
+    assert "AADHAAR" in entity_types
+
     assert verify_chain_intact(db_session) is True

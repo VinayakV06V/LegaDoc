@@ -140,7 +140,8 @@ class FabricClient:
             "--peerAddresses", "localhost:9051",
             "--tlsRootCertFiles", self._org2_tls,
             "-c", args_json,
-        ])
+            "--waitForEvent",
+        ], timeout=90)
         if "successful" not in output.lower() and "status:200" not in output:
             raise FabricSubmissionError(f"RecordHash did not report success: {output.strip()}")
         return {"raw_output": output.strip()}

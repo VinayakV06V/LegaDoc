@@ -29,14 +29,6 @@ from app.audit import write_audit_log
 from app.config import settings
 from app.database import SessionLocal
 
-from uuid import UUID
-
-from presidio_analyzer import AnalyzerEngine
-from presidio_analyzer.nlp_engine import NlpEngineProvider
-
-from app import models
-from app.database import SessionLocal
-from app.audit import write_audit_log
 logger = logging.getLogger(__name__)
 
 app = Celery(
@@ -46,61 +38,7 @@ app = Celery(
 )
 
 CONFIDENCE_REVIEW_THRESHOLD = 70  # 0-100; below this, auto-flag even on "success"
-# spaCy + Presidio NLP engine
-provider = NlpEngineProvider(
-    nlp_configuration={
-        "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-    }
-)
 
-nlp_engine = provider.create_engine()
-analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
-
-@app.task(name="ai_parser_worker.tag_document", bind=True, max_retries=5)
-def tag_document(self, document_id: str):
-
-    db = SessionLocal()
-
-    try:
-        # 1. Fetch document
-        document = db.get(models.Document, UUID(document_id))
-
-        if document is None:
-            raise Exception("Document not found")
-
-        if not document.raw_text:
-            raise Exception("OCR text not available")
-
-        # 2. Run Presidio + spaCy
-        results = analyzer.analyze(
-            text=document.raw_text,
-            language="en",
-        )
-
-        tags = []
-
-        # 3. Save sensitivity tags
-        for entity in results:
-            tag = models.DocumentSensitivityTag(
-                document_id=document.id,
-                entity_type=entity.entity_type,
-                span_start=entity.start,
-                span_end=entity.end,
-                confidence=int(round(entity.score * 100)),
-                source="presidio",
-            )
-
-            db.add(tag)
-            tags.append(tag)
-
-        # 4. Decide document status (Fail-Closed)
-        low_confidence = any(
-            tag.confidence < CONFIDENCE_REVIEW_THRESHOLD
-            for tag in tags
-        )
-
-        if low_confidence:
 # Optional Presidio Analyzer import
 try:
     from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
@@ -368,29 +306,6 @@ def process_tag_document(document_id: str, db: Optional[Any] = None) -> str:
         else:
             document.status = "ready"
 
-        # 5. Audit log
-        # 5. Audit log
-        write_audit_log(
-            db=db,
-            action="auto_tag_completed",
-            target_type="document",
-            target_id=document.id,
-            metadata={
-                "tags_created": len(tags),
-                "source": "ai_parser",
-            },
-        )
-
-        db.commit()
-
-        return {
-            "status": document.status,
-            "document_id": document_id,
-            "tags_created": len(tags),
-        }
-
-    finally:
-        db.close()
         session.commit()
         session.refresh(document)
 

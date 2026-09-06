@@ -12,10 +12,6 @@ import sys
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-sys.path.insert(
-    0,
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "api")
-)
 # Adjust sys.path to locate api/app as a package
 _api_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "api")
 if _api_path not in sys.path:
@@ -26,26 +22,11 @@ _worker_dir = os.path.dirname(os.path.abspath(__file__))
 if _worker_dir not in sys.path:
     sys.path.insert(0, _worker_dir)
 
-from celery import Celery, current_app
-from uuid import UUID
+from celery import Celery
 
 from app import models
 from app.audit import write_audit_log
 from app.config import settings
-from app import models
-from app.database import SessionLocal
-from app.storage import get_storage
-
-from ocr_engine.preprocess import preprocess_image
-from ocr_engine.ocr import run_ocr
-from ocr_engine.parser import parse_fir
-# Uncomment as you need them:
-# from uuid import UUID
-# from app import models
-# from app.database import SessionLocal
-# from app.storage import get_storage  # NOTE: get_storage() is a FastAPI
-#     Depends()-style function that lazily builds a module-level singleton —
-#     it works fine called directly here too, just isn't dependency-injected.
 from app.database import SessionLocal
 from app.storage import get_storage
 
@@ -70,54 +51,6 @@ try:
 except ImportError:
     _HAS_CV2 = False
 
-@app.task(name="ocr_worker.extract_document", bind=True, max_retries=5)
-def extract_document(self, document_id: str):
-
-    db = SessionLocal()
-
-    try:
-        # 1. Get document from database
-        document = db.get(models.Document, UUID(document_id))
-
-        if document is None:
-            raise Exception("Document not found")
-
-        # 2. Load uploaded image
-        storage = get_storage()
-        image_path = storage.get(document.storage_path)
-
-        # 3. Preprocess image
-        processed_path = preprocess_image(image_path)
-
-        # 4. Run PaddleOCR
-        ocr_result = run_ocr(processed_path)
-
-        # 5. Convert OCR result into plain text
-        raw_text = "\n".join(item["text"] for item in ocr_result)
-
-        # 6. Save raw OCR text
-        document.raw_text = raw_text
-        db.commit()
-
-        # 7. Generic FIR extraction
-        parsed_data = parse_fir(raw_text)
-
-        # 8. Send document to AI Parser worker
-        current_app.send_task(
-            "ai_parser_worker.tag_document",
-            args=[document_id],
-        )
-
-        # 9. Return OCR + parsed result
-        return {
-            "status": "success",
-            "document_id": document_id,
-            "raw_text": raw_text,
-            "parsed_data": parsed_data,
-        }
-
-    finally:
-        db.close()
 try:
     from PIL import Image
     _HAS_PIL = True
@@ -178,27 +111,54 @@ def preprocess_image_bytes(image_bytes: bytes) -> bytes:
     return image_bytes
 
 
-def run_paddle_ocr(image_bytes: bytes) -> List[Dict[str, Any]]:
-    """Runs PaddleOCR on image bytes and returns raw bounding box dicts:
-    [{"text": str, "confidence": float, "box": [x1, y1, x2, y2]}, ...]
+# Module-level cached OCR engines (Issue #37)
+_OCR_EN = None
+_OCR_HI = None
+
+
+def get_paddle_ocr_engines():
+    """Initializes and caches PaddleOCR engines for English and Hindi.
+    Explicitly loads and validates Hindi language model (PP-OCR Devanagari) to prevent
+    silent fallback to English weights.
     """
+    global _OCR_EN, _OCR_HI
     if not _HAS_PADDLE:
         raise RuntimeError("PaddleOCR engine not installed")
 
-    # Initialize English & Hindi engines lazily or per-call
-    ocr_en = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-    ocr_hi = PaddleOCR(use_angle_cls=True, lang="hi", show_log=False)
+    if _OCR_EN is None:
+        logger.info("Initializing PaddleOCR English model (lang='en')...")
+        _OCR_EN = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+
+    if _OCR_HI is None:
+        logger.info("Initializing PaddleOCR Hindi model (lang='hi')...")
+        try:
+            _OCR_HI = PaddleOCR(use_angle_cls=True, lang="hi", show_log=False)
+        except Exception as exc:
+            logger.error(f"Failed to load PaddleOCR Hindi language pack: {exc}")
+            raise RuntimeError(f"PaddleOCR Hindi language pack failed to initialize: {exc}")
+
+    return _OCR_EN, _OCR_HI
+
+
+def run_paddle_ocr(image_bytes: bytes) -> List[Dict[str, Any]]:
+    """Runs PaddleOCR on image bytes with explicit Hindi and English models:
+    [{"text": str, "confidence": float, "box": [x1, y1, x2, y2], "lang": str}, ...]
+    """
+    ocr_en, ocr_hi = get_paddle_ocr_engines()
 
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
         tmp.write(image_bytes)
         tmp.flush()
 
-        res_en = ocr_en.ocr(tmp.name, cls=True)
+        # Run Hindi engine (covers Devanagari script, numerals, and bilingual headers)
         res_hi = ocr_hi.ocr(tmp.name, cls=True)
+        # Run English engine (covers Latin script and English legal terms)
+        res_en = ocr_en.ocr(tmp.name, cls=True)
 
     words = []
-    for result_set in (res_en, res_hi):
+    # Place Hindi results first so Devanagari glyphs take precedence
+    for result_set, lang in ((res_hi, "hi"), (res_en, "en")):
         if result_set and result_set[0]:
             for line in result_set[0]:
                 box_pts = line[0]
@@ -214,18 +174,28 @@ def run_paddle_ocr(image_bytes: bytes) -> List[Dict[str, Any]]:
                     "text": text,
                     "confidence": score,
                     "box": [x1, y1, x2, y2],
+                    "lang": lang,
                 })
 
     return words
 
 
 def run_tesseract_fallback(image_bytes: bytes) -> List[Dict[str, Any]]:
-    """Tesseract fallback when PaddleOCR fails or is unavailable."""
+    """Tesseract fallback when PaddleOCR fails or is unavailable.
+    Attempts bilingual Hindi+English recognition before falling back to English.
+    """
     if not _HAS_TESSERACT or not _HAS_PIL:
         raise RuntimeError("Tesseract fallback engine not available")
 
     img = Image.open(io.BytesIO(image_bytes))
-    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+    # Attempt bilingual hin+eng first if tesseract-ocr-hin traineddata is installed
+    data = None
+    try:
+        data = pytesseract.image_to_data(img, lang="hin+eng", output_type=pytesseract.Output.DICT)
+    except Exception as exc:
+        logger.warning(f"Tesseract bilingual (hin+eng) failed, falling back to default: {exc}")
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
 
     words = []
     n_boxes = len(data["text"])

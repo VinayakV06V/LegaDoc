@@ -4,6 +4,7 @@ import { apiClient } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import RedactedBlock from '../components/RedactedBlock';
 import StatusChip from '../components/StatusChip';
+import HashCell from '../components/HashCell';
 
 export default function DocumentViewer() {
   const { id: caseId, docId } = useParams();
@@ -189,13 +190,7 @@ export default function DocumentViewer() {
                 <div>
                   <span className="text-label">Chain-of-Custody Hash</span>
                   <div style={{ marginTop: '4px' }}>
-                    <span
-                      className="mono-text"
-                      style={{ fontSize: '11px', display: 'block', wordBreak: 'break-all' }}
-                      title={doc.doc_hash}
-                    >
-                      {doc.doc_hash.substring(0, 16)}...{doc.doc_hash.substring(doc.doc_hash.length - 12)}
-                    </span>
+                    <HashCell hash={doc.doc_hash} />
                   </div>
                 </div>
               </div>

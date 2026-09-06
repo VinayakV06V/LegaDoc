@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import StatusChip from '../components/StatusChip';
+import HashCell from '../components/HashCell';
 
 export default function Judiciary() {
   const { user } = useAuth();
@@ -77,8 +79,8 @@ export default function Judiciary() {
             </p>
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <span className="tag tag-neutral">Role: Court / Magistrate</span>
-            <span className="tag tag-success">Privilege: Unredacted Judicial Review</span>
+            <StatusChip status="neutral" label="Role: Court / Magistrate" />
+            <StatusChip status="success" label="Privilege: Unredacted Judicial Review" />
           </div>
         </div>
 
@@ -139,7 +141,7 @@ export default function Judiciary() {
                         <td><span className="mono-text">{b.case_number}</span></td>
                         <td style={{ fontWeight: 500 }}>{b.accused}</td>
                         <td style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{b.sections}</td>
-                        <td><span className="tag tag-pending">{b.status}</span></td>
+                        <td><StatusChip status={b.status} /></td>
                         <td>
                           <button
                             className="btn btn-secondary"
@@ -229,7 +231,7 @@ export default function Judiciary() {
                       <td>{t.prosecutor}</td>
                       <td>{t.defense_counsel}</td>
                       <td>{t.next_hearing}</td>
-                      <td><span className="tag tag-success">Validated</span></td>
+                      <td><StatusChip status="confirmed" label="Stage Validated" /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -242,44 +244,44 @@ export default function Judiciary() {
         {activeTab === 'audit' && (
           <div className="card">
             <span className="table-caption">
-              Full unredacted audit trail verified against Hyperledger Fabric hash chain.
+              Full unredacted judicial audit trail verified against Hyperledger Fabric channel quorum.
             </span>
             <div className="table-container">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Timestamp</th>
-                    <th>Actor / Role</th>
-                    <th>Action</th>
+                    <th>Timestamp (IST)</th>
+                    <th>Actor / Authority</th>
+                    <th>Action Executed</th>
                     <th>Target Resource</th>
-                    <th>Hash / Block ID</th>
-                    <th>Integrity</th>
+                    <th>Cryptographic Digest</th>
+                    <th>Ledger Consensus</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
-                    <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>2026-09-02 10:30:14</td>
-                    <td>Duty Officer (Officer Kumar)</td>
-                    <td><span className="mono-text">case_registered</span></td>
-                    <td>CYB-2026-482910</td>
-                    <td><span className="mono-text">0x8a92b41c</span></td>
-                    <td><span className="tag tag-success">Chain Verified</span></td>
+                    <td style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>2026-09-02 10:30:14</td>
+                    <td>Duty Officer (Kumar · PS Central)</td>
+                    <td style={{ fontWeight: 500 }}>Case Inception & Genesis FIR Registration</td>
+                    <td><span className="mono-text">CYB-2026-482910</span></td>
+                    <td><HashCell hash="8a92b41c0981928475aeb90141eab14902148110912781290384aa8192837491" /></td>
+                    <td><StatusChip status="confirmed" label="Chain Verified" /></td>
                   </tr>
                   <tr>
-                    <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>2026-09-02 10:32:05</td>
-                    <td>AI Pipeline (PaddleOCR)</td>
-                    <td><span className="mono-text">redaction_auto_tagged</span></td>
-                    <td>Doc-4829-Complaint</td>
-                    <td><span className="mono-text">0x71e409aa</span></td>
-                    <td><span className="tag tag-neutral">4 Spans Tagged</span></td>
+                    <td style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>2026-09-02 10:32:05</td>
+                    <td>AI Pipeline (PaddleOCR Worker)</td>
+                    <td style={{ fontWeight: 500 }}>Automated Redaction & Span Inspection</td>
+                    <td><span className="mono-text">DOC-CYB-2026-001</span></td>
+                    <td><HashCell hash="71e409aa81928374910283740192847192837482910284718f92a11b6c73e048" /></td>
+                    <td><StatusChip status="neutral" label="4 Spans Redacted" /></td>
                   </tr>
                   <tr>
-                    <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>2026-09-02 11:15:30</td>
-                    <td>Investigating Officer (IO Rao)</td>
-                    <td><span className="mono-text">evidence_requested</span></td>
-                    <td>HDFC Bank Nodal Request</td>
-                    <td><span className="mono-text">0xfe228901</span></td>
-                    <td><span className="tag tag-success">Chain Verified</span></td>
+                    <td style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>2026-09-02 11:15:30</td>
+                    <td>Investigating Officer (IO S. Rao)</td>
+                    <td style={{ fontWeight: 500 }}>Section 91 CrPC Evidentiary Requisition</td>
+                    <td><span className="mono-text">HDFC-NODAL-REQ-01</span></td>
+                    <td><HashCell hash="fe22890141eab14902148110912781290384aa81928374918f92a11b6c73e048" /></td>
+                    <td><StatusChip status="confirmed" label="Chain Verified" /></td>
                   </tr>
                 </tbody>
               </table>

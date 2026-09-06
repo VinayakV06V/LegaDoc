@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { apiClient, apiUpload } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import StatusChip from '../components/StatusChip';
 
 export default function PoliceInvestigation() {
   const { user } = useAuth();
@@ -150,8 +151,8 @@ export default function PoliceInvestigation() {
             </p>
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <span className="tag tag-neutral">Role: {user?.role?.replace('_', ' ').toUpperCase() || 'DUTY OFFICER'}</span>
-            <span className="tag tag-success">Fabric Ledger: Active</span>
+            <StatusChip status="neutral" label={`Role: ${user?.role ? user.role.replace(/_/g, ' ').toUpperCase() : 'DUTY OFFICER'}`} />
+            <StatusChip status="confirmed" label="Fabric Ledger: Active" />
           </div>
         </div>
 
@@ -215,12 +216,12 @@ export default function PoliceInvestigation() {
                     </td>
                     <td>{c.crime_type}</td>
                     <td>
-                      <span className="tag tag-neutral">{c.investigation_status}</span>
+                      <StatusChip status={c.investigation_status} label={c.investigation_status ? c.investigation_status.replace(/_/g, ' ') : 'Registered'} />
                     </td>
                     <td>
-                      <span className="tag tag-success">Confirmed</span>
+                      <StatusChip status="confirmed" label="Ledger Confirmed" />
                     </td>
-                    <td style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+                    <td style={{ color: 'var(--color-text-secondary)', fontSize: '13px' }}>
                       {new Date(c.created_at || Date.now()).toLocaleDateString()}
                     </td>
                     <td>
@@ -352,7 +353,7 @@ export default function PoliceInvestigation() {
                   <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>
                     Redacted Document Preview
                   </span>
-                  <span className="tag tag-success">Ledger Verified</span>
+                  <StatusChip status="confirmed" label="Ledger Verified" />
                 </div>
                 <div style={{ background: 'var(--surface-sunken)', padding: '10px', borderRadius: '4px', fontSize: '12px', fontFamily: 'var(--font-mono)' }}>
                   {uploadedDoc.text}

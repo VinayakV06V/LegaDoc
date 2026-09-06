@@ -250,3 +250,42 @@ def test_ai_parser_case_diary_tagging(db_session, make_org, make_user):
     )
     assert audit_entry is not None
     assert verify_chain_intact(db_session) is True
+
+
+def test_ai_parser_low_quality_ocr_resilience_and_safety(db_session, make_org, make_user):
+    """Verifies that the parser handles degraded / low-quality OCR text:
+    1. Extracts spaced phone, Aadhaar, and prefixed names with OCR punctuation (: - . /).
+    2. Flags OCR-confused characters (e.g. PAN with 'I'/'O') to confidence 65, triggering needs_review.
+    3. Detects severe OCR noise/fragmentation and routes to needs_review (fail-closed).
+    """
+    # 1. OCR text with formatting artifacts (colons after titles, spaced numbers)
+    noisy_text = (
+        "Witness: Dr. Rajesh Sharma, Mob: 98765 43210, Aadhaar: 2345   6789   0123. "
+        "Suspect - Vikram Malhotra was present at the scene."
+    )
+    spans = ai_worker.parse_text_for_sensitive_spans(noisy_text)
+    entity_map = {s["entity_type"]: noisy_text[s["span_start"]:s["span_end"]] for s in spans}
+
+    assert "PERSON" in entity_map
+    assert "Rajesh Sharma" in entity_map["PERSON"] or "Vikram Malhotra" in entity_map["PERSON"]
+    assert "PHONE_NUMBER" in entity_map
+    assert "98765 43210" in entity_map["PHONE_NUMBER"]
+    assert "AADHAAR" in entity_map
+    assert "2345   6789   0123" in entity_map["AADHAAR"]
+
+    # 2. Degraded PAN with OCR letter confusion (I instead of 1)
+    ocr_corrupted_pan_text = "Complainant Shri Amit Kumar, PAN ABCDEI234F."
+    case1, user1, doc_pan = _setup_case_and_doc(db_session, make_org, make_user, raw_text=ocr_corrupted_pan_text)
+    status1 = ai_worker.process_tag_document(str(doc_pan.id), db=db_session)
+    assert status1 == "needs_review"  # Fail-closed triggered by low confidence (65)
+    db_session.refresh(doc_pan)
+    assert doc_pan.status == "needs_review"
+
+    # 3. Heavily garbled OCR garbage text (scan quality too low to decipher)
+    garbled_ocr_text = "~!@#$%^&*()_+=-`~ <><><> ?/::;{}[]\\| 1234567890 !@#$%^&*()_+=-`~"
+    case2, user2, doc_noise = _setup_case_and_doc(db_session, make_org, make_user, raw_text=garbled_ocr_text)
+    status2 = ai_worker.process_tag_document(str(doc_noise.id), db=db_session)
+    assert status2 == "needs_review"  # Fail-closed triggered by text quality assessment
+    db_session.refresh(doc_noise)
+    assert doc_noise.status == "needs_review"
+

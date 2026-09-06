@@ -54,22 +54,34 @@ class LegalPIIRecognizer:
     """
 
     PATTERNS = [
-        # 1. Aadhaar Number (12 digits, doesn't start with 0 or 1, optional space or dash)
+        # 1. Aadhaar Number (12 digits, doesn't start with 0 or 1, flexible space or dash)
         {
             "entity_type": "AADHAAR",
-            "regex": re.compile(r"\b[2-9]\d{3}[ -]?\d{4}[ -]?\d{4}\b"),
+            "regex": re.compile(r"\b[2-9]\d{3}[ -]*\d{4}[ -]*\d{4}\b"),
             "confidence": 85,
         },
-        # 2. PAN Card Number (5 letters, 4 digits, 1 letter)
+        # 2. PAN Card Number (Standard: 5 letters, 4 digits, 1 letter)
         {
             "entity_type": "PAN",
             "regex": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
             "confidence": 90,
         },
-        # 3. Indian Phone Number (10 digits starting with 6-9, optional +91 prefix)
+        # 2b. PAN Card with OCR character confusion (e.g. 'O'/'0' or 'I'/'1' in 4-digit block)
+        # Sets lower confidence (65) so it safely auto-flags for human review (fail-closed)
+        {
+            "entity_type": "PAN",
+            "regex": re.compile(r"\b[A-Z]{5}[ -]?[0-9OI]{4}[ -]?[A-Z]\b"),
+            "confidence": 65,
+        },
+        # 3. Indian Phone Number (10 digits starting with 6-9, flexible grouping/spaces/hyphens or +91 prefix)
         {
             "entity_type": "PHONE_NUMBER",
-            "regex": re.compile(r"(?:\+91[\-\s]?)?[6-9]\d{9}\b|\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"),
+            "regex": re.compile(
+                r"(?:\+91[\-\s]?)?[6-9]\d{9}\b|"
+                r"(?:\+91[\-\s]?)?[6-9]\d{4}[\s\-]?[0-9]{5}\b|"
+                r"(?:\+91[\-\s]?)?[6-9]\d{2}[\s\-]?[0-9]{3}[\s\-]?[0-9]{4}\b|"
+                r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"
+            ),
             "confidence": 85,
         },
         # 4. Email Address
@@ -89,12 +101,12 @@ class LegalPIIRecognizer:
             ),
             "confidence": 85,
         },
-        # 6. Person Names with Indian Police/Court prefixes or indicators
+        # 6. Person Names with Indian Police/Court prefixes, tolerant of OCR punctuation (: - . /) and spacing
         {
             "entity_type": "PERSON",
             "regex": re.compile(
-                r"(?:\b(?:Mr|Mrs|Ms|Miss|Shri|Smt|Dr|Prof|Advocate|Adv|Inspector|Sub-Inspector|SI|ASI|HC|Constable|"
-                r"Officer|Witness|Suspect|Accused|Victim|Complainant)\.?\s+)+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b"
+                r"(?i:(?:\b(?:Mr|Mrs|Ms|Miss|Shri|Smt|Dr|Prof|Advocate|Adv|Inspector|Sub-Inspector|SI|ASI|HC|Constable|"
+                r"Officer|Witness|Suspect|Accused|Victim|Complainant)\b[\.\:\-\/]?\s+)+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b"
             ),
             "confidence": 80,
             "capture_group": 1,
@@ -102,7 +114,7 @@ class LegalPIIRecognizer:
         {
             "entity_type": "PERSON",
             "regex": re.compile(
-                r"\b(?:named|alias|identified\s+as|son\s+of|daughter\s+of|w/o|s/o|d/o)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b"
+                r"(?i)\b(?:named|alias|identified\s+as|son\s+of|daughter\s+of|w/o|s/o|d/o)[\s\:\-]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b"
             ),
             "confidence": 80,
             "capture_group": 1,
@@ -191,14 +203,47 @@ def parse_text_for_sensitive_spans(text: str, doc_type: str = "general") -> List
     return _resolve_overlapping_spans(all_spans)
 
 
+def assess_text_quality(text: str) -> tuple[bool, Optional[str]]:
+    """Evaluates whether the raw text exhibits severe OCR degradation:
+    - High non-alphanumeric noise / garbage characters.
+    - Low alphanumeric ratio (< 50% on substantial text).
+    - Unusually high proportion of isolated single-character tokens (OCR fragmentation).
+    """
+    if not text or len(text.strip()) < 30:
+        return True, None
+
+    cleaned = text.strip()
+    non_ws = [c for c in cleaned if not c.isspace()]
+    if not non_ws:
+        return True, None
+
+    alnum_count = sum(1 for c in non_ws if c.isalnum())
+    alnum_ratio = alnum_count / len(non_ws)
+
+    # If alphanumeric content is under 50% in a text with > 40 chars, it is garbled OCR
+    if len(non_ws) > 40 and alnum_ratio < 0.50:
+        return False, f"Low alphanumeric ratio ({alnum_ratio:.1%}): severe OCR noise"
+
+    # Check for heavy token fragmentation (e.g. "t h e   f i r   n o")
+    tokens = cleaned.split()
+    if len(tokens) >= 10:
+        single_char_tokens = sum(1 for t in tokens if len(t) == 1 and t.isalnum())
+        single_ratio = single_char_tokens / len(tokens)
+        if single_ratio > 0.45:
+            return False, f"Excessive character fragmentation ({single_ratio:.1%}): degraded scan"
+
+    return True, None
+
+
 def process_tag_document(document_id: str, db: Optional[Any] = None) -> str:
     """Core orchestration for auto-tagging a document:
     1. Fetches Document and reads Document.raw_text.
-    2. Extracts sensitive spans.
-    3. Writes DocumentSensitivityTag rows (never raw text).
-    4. Evaluates confidence threshold (70): routes to 'ready' or 'needs_review'.
-    5. Writes tamper-evident audit log under pg_advisory_xact_lock.
-    6. Enforces FAIL-CLOSED rule on any exception.
+    2. Checks OCR text quality for degradation / noise.
+    3. Extracts sensitive spans.
+    4. Writes DocumentSensitivityTag rows (never raw text).
+    5. Evaluates confidence threshold (70) and quality: routes to 'ready' or 'needs_review'.
+    6. Writes tamper-evident audit log under pg_advisory_xact_lock.
+    7. Enforces FAIL-CLOSED rule on any exception or low-confidence tag.
     """
     session = db if db is not None else SessionLocal()
     try:
@@ -212,6 +257,9 @@ def process_tag_document(document_id: str, db: Optional[Any] = None) -> str:
             document.status = "needs_review"
             session.commit()
             return "needs_review"
+
+        # Check OCR quality / degradation
+        is_quality_ok, quality_reason = assess_text_quality(document.raw_text)
 
         spans = parse_text_for_sensitive_spans(document.raw_text, doc_type=document.doc_type)
 
@@ -233,9 +281,9 @@ def process_tag_document(document_id: str, db: Optional[Any] = None) -> str:
             )
             session.add(tag)
 
-        # Confidence review threshold (default: 70)
+        # Confidence review threshold (default: 70) and text quality gate
         has_low_confidence = any(s["confidence"] < CONFIDENCE_REVIEW_THRESHOLD for s in spans)
-        if has_low_confidence:
+        if has_low_confidence or not is_quality_ok:
             document.status = "needs_review"
         else:
             document.status = "ready"
@@ -256,6 +304,8 @@ def process_tag_document(document_id: str, db: Optional[Any] = None) -> str:
                 "status": document.status,
                 "entity_types": sorted(list(set(s["entity_type"] for s in spans))),
                 "min_confidence": min((s["confidence"] for s in spans), default=100),
+                "ocr_quality_ok": is_quality_ok,
+                "ocr_quality_reason": quality_reason,
             },
         )
 

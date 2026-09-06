@@ -2,37 +2,31 @@ from paddleocr import PaddleOCR
 import json
 import os
 
-# English PP-OCRv5
-ocr_en = PaddleOCR(
-    text_detection_model_name="PP-OCRv5_server_det",
-    text_recognition_model_name="PP-OCRv5_server_rec"
-)
+# English OCR
+ocr_en = PaddleOCR(use_angle_cls=True, lang="en")
 
-# Hindi PP-OCRv5
-ocr_hi = PaddleOCR(
-    text_detection_model_name="PP-OCRv5_server_det",
-    text_recognition_model_name="PP-OCRv5_server_rec"
-)
+# Hindi OCR
+ocr_hi = PaddleOCR(use_angle_cls=True, lang="hi")
 
 
 def extract(engine, image_path):
-    results = engine.predict(image_path)
+    result = engine.ocr(image_path, cls=True)
     words = []
 
-    for page in results:
-        texts = page["rec_texts"]
-        scores = page["rec_scores"]
-        boxes = page["rec_boxes"]
+    if result and result[0]:
+        for line in result[0]:
+            box = line[0]
+            text = line[1][0]
+            score = float(line[1][1])
 
-        for txt, score, box in zip(texts, scores, boxes):
             x1 = int(min(p[0] for p in box))
             y1 = int(min(p[1] for p in box))
             x2 = int(max(p[0] for p in box))
             y2 = int(max(p[1] for p in box))
 
             words.append({
-                "text": txt,
-                "confidence": float(score),
+                "text": text,
+                "confidence": score,
                 "box": [x1, y1, x2, y2],
                 "x": x1,
                 "y": y1
@@ -41,15 +35,14 @@ def extract(engine, image_path):
     return words
 
 
-
 def remove_duplicates(words):
     final = []
     seen = set()
 
     for w in words:
         key = (
-            round(w["x"] / 8),
-            round(w["y"] / 8),
+            round(w["x"] / 6),
+            round(w["y"] / 6),
             w["text"].lower()
         )
 
@@ -82,4 +75,3 @@ if __name__ == "__main__":
         json.dump(data, f, indent=4, ensure_ascii=False)
 
     print("Saved:", OUTPUT)
-    

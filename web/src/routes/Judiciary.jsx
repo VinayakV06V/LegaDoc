@@ -159,10 +159,44 @@ export default function Judiciary() {
             </div>
 
             <div className="card">
-              <h2 className="card-title">Issue Judicial Bail Order</h2>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '16px' }}>
+              <h2 className="card-title">Issue Judicial Bail Order & Statutory Compliance</h2>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
                 Target Docket: <strong>{selectedCase}</strong>. All determinations are signed and committed to the ledger.
               </p>
+
+              {/* Statutory Pathway Guidance Box */}
+              <div style={{
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border-color)',
+                padding: '12px',
+                marginBottom: '16px',
+                fontSize: '12px',
+                lineHeight: '1.5'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                    Statutory Bail Classification:
+                  </span>
+                  <span style={{
+                    fontWeight: 600,
+                    color: selectedCase.startsWith('NDP') ? '#b91c1c' : '#0369a1'
+                  }}>
+                    {selectedCase.startsWith('NDP') 
+                      ? 'Strictly Non-Bailable (NDPS Act § 37 Twin Conditions Apply)' 
+                      : 'Non-Bailable (Sec 437/439 CrPC Judicial Discretion)'}
+                  </span>
+                </div>
+                <div style={{ color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  <strong>Applicable Statute:</strong> {selectedCase.startsWith('NDP') 
+                    ? 'Narcotic Drugs and Psychotropic Substances Act, 1985 (Sec 20/21/37)' 
+                    : 'Information Technology Act, 2000 (Sec 66D) r/w IPC Sec 420 (Sec 318 BNS)'}
+                </div>
+                <div style={{ color: 'var(--text-secondary)' }}>
+                  <strong>Mandatory Judicial Gate:</strong> {selectedCase.startsWith('NDP')
+                    ? 'Court must record affirmative satisfaction that: (i) Accused is not guilty, and (ii) Unlikely to commit offense on bail.'
+                    : 'Verification of digital asset lien, device seizure logs, and absence of flight risk.'}
+                </div>
+              </div>
 
               <form onSubmit={handleIssueBailOrder}>
                 <div className="form-group">

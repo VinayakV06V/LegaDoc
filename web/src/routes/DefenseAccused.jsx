@@ -104,6 +104,17 @@ export default function DefenseAccused() {
               </div>
 
               <div className="form-group">
+                <label className="form-label">Statutory Petition Category</label>
+                <select className="form-select" defaultValue="regular">
+                  <option value="regular">Regular Bail Petition — Section 437/439 CrPC (Sec 480/483 BNSS)</option>
+                  <option value="anticipatory">Anticipatory Bail Application — Section 438 CrPC (Sec 482 BNSS)</option>
+                  <option value="interim">Interim Medical / Humanitarian Bail Application</option>
+                  <option value="ndps">Special Bail Petition under NDPS Act § 37 (Commercial Contraband)</option>
+                  <option value="pmla">Special Bail Petition under PMLA § 45 (Economic Offenses)</option>
+                </select>
+              </div>
+
+              <div className="form-group">
                 <label className="form-label">Accused Full Name</label>
                 <input
                   type="text"

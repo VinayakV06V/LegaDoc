@@ -20,7 +20,7 @@ class SlidingWindowRateLimiter:
         self._lock = threading.Lock()
         self._requests: dict[str, list[float]] = defaultdict(list)
 
-    def check(self, key: str) -> None:
+    def check(self, key: str, detail: str | None = None) -> None:
         """Checks whether the given key has exceeded the allowed request quota.
         Raises HTTPException(429) with Retry-After header if exceeded.
         """
@@ -33,9 +33,10 @@ class SlidingWindowRateLimiter:
             if len(timestamps) >= self.max_requests:
                 earliest_active = timestamps[0]
                 retry_after = max(1, int(earliest_active + self.window_seconds - now) + 1)
+                err_detail = detail or f"Rate limit exceeded. Maximum {self.max_requests} requests per {self.window_seconds}s."
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"Rate limit exceeded. Maximum {self.max_requests} requests per {self.window_seconds}s.",
+                    detail=err_detail,
                     headers={"Retry-After": str(retry_after)},
                 )
 
@@ -55,3 +56,6 @@ class SlidingWindowRateLimiter:
 
 # Default singleton instance for AI Parser audit endpoint (20 req / 60 sec)
 ai_parser_limiter = SlidingWindowRateLimiter(max_requests=20, window_seconds=60)
+
+# Default singleton instance for Login endpoint (10 req / 60 sec per IP, see settings.LOGIN_RATE_LIMIT)
+login_rate_limiter = SlidingWindowRateLimiter(max_requests=10, window_seconds=60)

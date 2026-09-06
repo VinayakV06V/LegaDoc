@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 class LoginRequest(BaseModel):
     email: str  # Official email or Government Service ID / Badge Number
     password: str
+    mfa_code: Optional[str] = None
 
 
 class TokenResponse(BaseModel):
@@ -30,6 +31,25 @@ class RefreshRequest(BaseModel):
 class AccessTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class MFASetupResponse(BaseModel):
+    secret: str
+    provisioning_uri: str
+    mfa_enabled: bool
+
+
+class MFAVerifyRequest(BaseModel):
+    code: str
+
+
+class MFADisableRequest(BaseModel):
+    password: str
 
 
 # ---------- Cases ----------

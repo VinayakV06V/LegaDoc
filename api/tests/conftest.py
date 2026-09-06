@@ -34,6 +34,17 @@ def _fresh_schema():
     Base.metadata.drop_all(bind=TEST_ENGINE)
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters():
+    """Reset singleton sliding-window rate limiters before and after each test."""
+    from app.rate_limit import login_rate_limiter, ai_parser_limiter
+    login_rate_limiter.reset()
+    ai_parser_limiter.reset()
+    yield
+    login_rate_limiter.reset()
+    ai_parser_limiter.reset()
+
+
 @pytest.fixture
 def db_session():
     session = TestSessionLocal()
@@ -94,8 +105,11 @@ def make_user(db_session, make_org):
     return _make
 
 
-def login(client, email, password="correct-horse-battery-staple"):
-    resp = client.post("/auth/login", json={"email": email, "password": password})
+def login(client, email, password="correct-horse-battery-staple", mfa_code=None):
+    payload = {"email": email, "password": password}
+    if mfa_code is not None:
+        payload["mfa_code"] = mfa_code
+    resp = client.post("/auth/login", json=payload)
     return resp
 
 

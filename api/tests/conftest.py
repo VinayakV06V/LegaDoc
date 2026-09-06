@@ -5,11 +5,17 @@ external services at all — exactly what makes it runnable anywhere, including
 before the rest of the infra exists.
 """
 
+import os
+os.environ["ENV"] = "test"
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+from app.config import settings
+settings.ENV = "test"
 
 from app.database import Base, get_db
 from app.main import app

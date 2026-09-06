@@ -1,12 +1,51 @@
-import re
+import json
+import os
 
-def parse_fir(raw_text: str):
-    """
-    Generic FIR parser
-    Input  : Raw OCR text
-    Output : Dictionary of extracted fields
-    """
 
+# ---------------- HELPERS ----------------
+
+def center_y(box):
+    return (box[1] + box[3]) / 2
+
+
+def same_row(a, b, threshold=12):
+    return abs(center_y(a["box"]) - center_y(b["box"])) <= threshold
+
+
+def nearest_right(label, words):
+    candidates = []
+
+    lx2 = label["box"][2]
+
+    for w in words:
+        if w is label:
+            continue
+
+        if same_row(label, w) and w["box"][0] > lx2:
+            distance = w["box"][0] - lx2
+            candidates.append((distance, w))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]["text"]
+
+
+def find_label(words, labels):
+    for w in words:
+        t = w["text"].lower()
+
+        for l in labels:
+            if l.lower() in t:
+                return w
+
+    return None
+
+
+# ---------------- PARSER ----------------
+
+def parse_fir(words):
     parsed = {
         "fir_number": None,
         "district": None,
@@ -18,56 +57,40 @@ def parse_fir(raw_text: str):
         "type_of_information": None,
     }
 
-    # ---------- FIR Number ----------
-    m = re.search(
-        r"(?:FIR|F\.?I\.?R\.?)\s*(?:No\.?|Number)?[:\-\s]*([0-9]{1,4})/?(20\d{2})?",
-        raw_text,
-        re.IGNORECASE,
-    )
-    if m:
-        parsed["fir_number"] = m.group(1).zfill(4)
-        if m.group(2):
-            parsed["year"] = m.group(2)
+    fields = {
+        "district": ["District", "जिला"],
+        "police_station": ["P.S.", "Police Station", "थाना"],
+        "year": ["Year", "वर्ष"],
+        "fir_number": ["FIR No", "FIR NO", "एफ.आई.आर"],
+        "registration_date": ["Date", "दिनांक"],
+        "registration_time": ["Time", "समय"],
+        "type_of_information": ["Type of Information", "सूचना का प्रकार"],
+    }
 
-    # ---------- District ----------
-    m = re.search(r"District\s*[:\-]?\s*([A-Za-z ]+)", raw_text, re.IGNORECASE)
-    if m:
-        parsed["district"] = m.group(1).strip()
-
-    # ---------- Police Station ----------
-    m = re.search(r"P\.?S\.?\s*[:\-]?\s*([A-Za-z ]+)", raw_text, re.IGNORECASE)
-    if m:
-        parsed["police_station"] = m.group(1).strip()
-
-    # ---------- Registration Date ----------
-    m = re.search(r"\b\d{2}[/-]\d{2}[/-]\d{4}\b", raw_text)
-    if m:
-        parsed["registration_date"] = m.group()
-
-    # ---------- Registration Time ----------
-    m = re.search(r"\b\d{2}:\d{2}\b", raw_text)
-    if m:
-        parsed["registration_time"] = m.group()
-
-    # ---------- IPC Sections ----------
-    ipc_sections = set()
-
-    matches = re.findall(
-        r"(?:IPC\s*Sections?|Sections?|U/S|Under\s*Section)\s*[:\-]?\s*([\d,\s/]+)",
-        raw_text,
-        re.IGNORECASE,
-    )
-
-    for match in matches:
-        nums = re.findall(r"\d{3}", match)
-        ipc_sections.update(nums)
-
-    parsed["ipc_sections"] = sorted(ipc_sections)
-
-    # ---------- Type of Information ----------
-    if re.search(r"Written", raw_text, re.IGNORECASE):
-        parsed["type_of_information"] = "Written"
-    elif re.search(r"Oral", raw_text, re.IGNORECASE):
-        parsed["type_of_information"] = "Oral"
+    for key, labels in fields.items():
+        label = find_label(words, labels)
+        if label:
+            value = nearest_right(label, words)
+            parsed[key] = value
 
     return parsed
+
+
+# ---------------- MAIN ----------------
+
+if __name__ == "__main__":
+
+    INPUT = os.path.join("outputs", "ocr_result.json")
+    OUTPUT = os.path.join("outputs", "parsed_fir.json")
+
+    with open(INPUT, "r", encoding="utf-8") as f:
+        words = json.load(f)
+
+    parsed = parse_fir(words)
+
+    os.makedirs("outputs", exist_ok=True)
+
+    with open(OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(parsed, f, indent=4, ensure_ascii=False)
+
+    print("Saved:", OUTPUT)

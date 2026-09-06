@@ -2,34 +2,21 @@ import subprocess
 import sys
 
 steps = [
-    ("Image Preprocessing", "app/preprocess.py"),
-    ("PaddleOCR", "app/ocr.py"),
-    ("FIR Parser", "app/parser.py"),
-    ("FIR Semantic AI", "app/semantic.py"),
-    ("Retention Layer", "-m app.test_database")
+    ("Image Preprocessing", "ocr_engine/preprocess.py"),
+    ("OCR Extraction", "ocr_engine/ocr.py"),
+    ("FIR Parsing", "ocr_engine/parser.py"),
+    ("Semantic Structuring", "ocr_engine/semantic.py"),
 ]
 
 print("\n========== FIR OCR PIPELINE ==========\n")
 
-for name, command in steps:
+for title, script in steps:
+    print(f"\nRunning: {title}")
 
-    print(f"\nRunning: {name}")
-
-    if command.startswith("-m"):
-        result = subprocess.run(
-            [sys.executable] + command.split(),
-            check=False
-        )
-    else:
-        result = subprocess.run(
-            [sys.executable, command],
-            check=False
-        )
+    result = subprocess.run([sys.executable, script])
 
     if result.returncode != 0:
-        print(f"\n{name} failed!")
-        sys.exit(1)
+        print(f"\n{title} failed!")
+        exit(1)
 
-print("\n======================================")
-print("FIR OCR PIPELINE COMPLETED!")
-print("======================================")
+print("\nPipeline completed successfully!")

@@ -1,32 +1,28 @@
 import cv2
 import os
 
-def preprocess_image(image_path: str) -> str:
-    """
-    Preprocess an uploaded image and return the processed image path.
-    """
+def preprocess(input_path, output_path):
+    img = cv2.imread(input_path)
 
-    image = cv2.imread(image_path)
+    img = cv2.resize(img, None, fx=2, fy=2,
+                     interpolation=cv2.INTER_CUBIC)
 
-    if image is None:
-        raise FileNotFoundError(f"Image not found: {image_path}")
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.fastNlMeansDenoising(gray)
 
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    _, thresh = cv2.threshold(
-        gray, 0, 255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    th = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        15
     )
 
     os.makedirs("processed", exist_ok=True)
+    cv2.imwrite(output_path, th)
+    print("Saved:", output_path)
 
-    output_path = os.path.join(
-        "processed",
-        os.path.basename(image_path)
-    )
-
-    cv2.imwrite(output_path, thresh)
-
-    return output_path
+if __name__ == "__main__":
+    preprocess("uploads/test.jpg", "processed/test.jpg")

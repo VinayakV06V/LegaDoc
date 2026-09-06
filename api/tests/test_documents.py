@@ -3,10 +3,17 @@
 logic. OCR/AI-Parser/Chain Worker task bodies are not exercised here — they
 stay stubs, see workers/*/worker.py."""
 
+import io
+import zipfile
 from uuid import UUID, uuid4
+
+import pytest
+from fastapi import HTTPException
 
 from app import models
 from app.audit import verify_chain_intact
+from app.storage import LocalObjectStorage
+from app.upload_validator import safe_inspect_archive_decompression
 from tests.conftest import auth_headers, login
 
 
@@ -91,7 +98,14 @@ def test_upload_writes_a_real_file_to_storage(client, make_user, db_session, tmp
 
     document = db_session.get(models.Document, UUID(doc_id))
     stored_path = tmp_path / "objects" / document.storage_path
-    assert stored_path.read_bytes() == content
+    # Verification of encryption-at-rest: physical file on disk is encrypted ciphertext (Fernet token)
+    raw_disk_bytes = stored_path.read_bytes()
+    assert raw_disk_bytes != content
+    assert raw_disk_bytes.startswith(b"gAAAAA")
+
+    # Accessing through LocalObjectStorage transparently decrypts the ciphertext
+    storage = LocalObjectStorage(str(tmp_path / "objects"))
+    assert storage.get(document.storage_path) == content
     assert document.doc_hash  # a real sha256 hex digest was computed
 
 
@@ -720,5 +734,228 @@ def test_end_to_end_pipeline_flow_and_artifact_generation(client, make_user, mak
 
     # 9. Verify tamper-evident cryptographic hash chain is intact
     assert verify_chain_intact(db_session) is True
+
+
+def test_upload_with_pdf_launch_or_javascript_exploit_rejected(client, make_user, db_session):
+    """Exploit screening: Weaponized PDF payloads with /Launch or /JavaScript actions are rejected."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+
+    # 1. Reject PDF with /Launch action
+    launch_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Action /S /Launch /F (calc.exe) >>\nendobj\n%%EOF"
+    resp_launch = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("exploit_launch.pdf", launch_pdf, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    assert resp_launch.status_code == 400
+    assert "malicious PDF action '/Launch'" in resp_launch.json()["detail"]
+
+    # 2. Reject PDF with /JavaScript action
+    js_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Action /S /JavaScript /JS (app.alert(1)) >>\nendobj\n%%EOF"
+    resp_js = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("exploit_js.pdf", js_pdf, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    assert resp_js.status_code == 400
+    assert "malicious PDF action '/JavaScript'" in resp_js.json()["detail"]
+
+
+def test_upload_archive_disguised_as_pdf_rejected(client, make_user, db_session):
+    """Polyglot archive defense: Disguised zip file claiming to be PDF is caught by magic bytes and rejected."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+
+    # ZIP signature PK\x03\x04
+    zip_bytes = b"PK\x03\x04\x14\x00\x00\x00" + b"\x00" * 64
+    resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("innocent.pdf", zip_bytes, "application/pdf")},
+        headers=auth_headers(io_token),
+    )
+    assert resp.status_code == 415
+    assert "Unsupported file type 'application/zip'" in resp.json()["detail"]
+
+
+def test_upload_pixel_decompression_bomb_rejected(client, make_user, db_session):
+    """Pixel decompression bomb defense: Images exceeding 40 Megapixels are rejected to prevent OCR DoS."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+
+    # PNG with header width=20,000, height=20,000 (400 Megapixels)
+    png_sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_len = (13).to_bytes(4, "big")
+    ihdr_type = b"IHDR"
+    ihdr_data = (20000).to_bytes(4, "big") + (20000).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    pixel_bomb = png_sig + ihdr_len + ihdr_type + ihdr_data + b"\x00\x00\x00\x00"
+
+    resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("pixel_bomb.png", pixel_bomb, "image/png")},
+        headers=auth_headers(io_token),
+    )
+    assert resp.status_code == 400
+    assert "pixel decompression bomb defense" in resp.json()["detail"]
+
+
+def test_archive_decompression_zip_bomb_and_zip_slip_defenses():
+    """Archive safety utility checks: Enforces Zip-Bomb ratio limit, Zip-Slip path traversal, and nested archives."""
+    # 1. Zip Bomb ratio check (> 100:1 ratio)
+    bomb_buf = io.BytesIO()
+    with zipfile.ZipFile(bomb_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # 2MB of zeroes compresses to ~2KB -> ratio ~1000:1
+        zf.writestr("huge_sparse.txt", b"\x00" * (2 * 1024 * 1024))
+
+    with pytest.raises(HTTPException) as exc_info:
+        safe_inspect_archive_decompression(bomb_buf.getvalue(), max_ratio=100.0)
+    assert exc_info.value.status_code == 400
+    assert "Zip Bomb defense" in exc_info.value.detail
+
+    # 2. Zip-Slip directory traversal check (../)
+    slip_buf = io.BytesIO()
+    with zipfile.ZipFile(slip_buf, "w") as zf:
+        zf.writestr("../../etc/passwd", b"root:x:0:0:root")
+
+    with pytest.raises(HTTPException) as exc_info:
+        safe_inspect_archive_decompression(slip_buf.getvalue())
+    assert exc_info.value.status_code == 400
+    assert "Zip-Slip defense" in exc_info.value.detail
+
+    # 3. Nested archive recursion defense
+    nested_buf = io.BytesIO()
+    with zipfile.ZipFile(nested_buf, "w") as zf:
+        zf.writestr("nested.zip", b"PK\x03\x04\x00")
+
+    with pytest.raises(HTTPException) as exc_info:
+        safe_inspect_archive_decompression(nested_buf.getvalue())
+    assert exc_info.value.status_code == 400
+    assert "recursion depth defense" in exc_info.value.detail
+
+    # 4. Normal archive passes safely
+    safe_buf = io.BytesIO()
+    with zipfile.ZipFile(safe_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("evidence_log.txt", b"Standard non-malicious evidence log text.")
+    # Should not raise any exception
+    safe_inspect_archive_decompression(safe_buf.getvalue())
+
+
+def test_legal_hold_lifecycle_and_deletion_prevention(client, make_user, db_session, tmp_path):
+    """Evidentiary retention legal hold:
+    1. Default document has retention_legal_hold = False.
+    2. Court / Prosecutor / SHO sets retention_legal_hold = True.
+    3. Document deletion is blocked with 409 Conflict while legal hold is active.
+    4. Lifting legal hold permits authorized purge (court/config_admin) and cleans up storage object.
+    """
+    duty = make_user("duty_officer", email="duty_lh@example.com", password="pw")
+    sho = make_user("sho", email="sho_lh@example.com", password="pw", org=duty.organization)
+    court = make_user("court", email="court_lh@delhicourts.gov.in", password="pw", org=duty.organization)
+    io = make_user("io", email="io_lh@example.com", password="pw", org=duty.organization)
+
+    duty_token = login(client, "duty_lh@example.com", "pw").json()["access_token"]
+    case_resp = client.post(
+        "/cases",
+        json={"crime_type": "Homicide", "complaint_text": "Critical homicide case evidence."},
+        headers=auth_headers(duty_token),
+    )
+    case = case_resp.json()
+
+    sho_token = login(client, "sho_lh@example.com", "pw").json()["access_token"]
+    client.post(
+        f"/cases/{case['id']}/assign-io",
+        json={"io_user_id": str(io.id)},
+        headers=auth_headers(sho_token),
+    )
+
+    io_token = login(client, "io_lh@example.com", "pw").json()["access_token"]
+    court_token = login(client, "court_lh@delhicourts.gov.in", "pw").json()["access_token"]
+
+    # 1. Upload document
+    upload_resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Forensic Report"},
+        files={"file": ("forensic.txt", b"Critical ballistics evidence report.", "text/plain")},
+        headers=auth_headers(io_token),
+    )
+    assert upload_resp.status_code == 202
+    doc_id = upload_resp.json()["id"]
+
+    # Initial view has retention_legal_hold = False
+    doc_view = client.get(f"/documents/{doc_id}", headers=auth_headers(court_token)).json()
+    assert doc_view["retention_legal_hold"] is False
+
+    # 2. Court issues Preservation Order placing document under legal hold
+    hold_resp = client.post(
+        f"/documents/{doc_id}/legal-hold",
+        json={"legal_hold": True, "reason": "High Court Preservation Order #882/2026"},
+        headers=auth_headers(court_token),
+    )
+    assert hold_resp.status_code == 200
+    hold_data = hold_resp.json()
+    assert hold_data["retention_legal_hold"] is True
+    assert hold_data["document_id"] == doc_id
+
+    # Verify updated view
+    doc_view2 = client.get(f"/documents/{doc_id}", headers=auth_headers(court_token)).json()
+    assert doc_view2["retention_legal_hold"] is True
+
+    # 3. Attempt to delete document while legal hold is active -> HTTP 409 Conflict
+    del_blocked_resp = client.delete(f"/documents/{doc_id}", headers=auth_headers(court_token))
+    assert del_blocked_resp.status_code == 409
+    assert "active retention legal hold" in del_blocked_resp.json()["detail"]
+
+    # Verify document still exists in DB
+    doc_in_db = db_session.get(models.Document, UUID(doc_id))
+    assert doc_in_db is not None
+
+    # 4. Release legal hold
+    release_resp = client.post(
+        f"/documents/{doc_id}/legal-hold",
+        json={"legal_hold": False, "reason": "Preservation order expired; case disposed."},
+        headers=auth_headers(court_token),
+    )
+    assert release_resp.status_code == 200
+    assert release_resp.json()["retention_legal_hold"] is False
+
+    # 5. Now deletion succeeds
+    del_ok_resp = client.delete(f"/documents/{doc_id}", headers=auth_headers(court_token))
+    assert del_ok_resp.status_code == 200
+    assert del_ok_resp.json()["detail"] == "Document successfully purged"
+
+    # Verify document record removed from DB
+    db_session.expire_all()
+    assert db_session.get(models.Document, UUID(doc_id)) is None
+
+    # Verify physical file removed from storage
+    storage_path = tmp_path / "objects" / doc_in_db.storage_path
+    assert not storage_path.exists()
+
+
+def test_legal_hold_unauthorized_role_rejected(client, make_user, db_session):
+    """Unauthorized roles cannot toggle legal hold or purge documents."""
+    case, io, io_token = _setup_case_with_io(client, make_user, db_session)
+
+    upload_resp = client.post(
+        "/documents",
+        data={"case_id": case["id"], "doc_type": "Witness Statement"},
+        files={"file": ("stmt.txt", b"Witness statement content.", "text/plain")},
+        headers=auth_headers(io_token),
+    )
+    doc_id = upload_resp.json()["id"]
+
+    # IO role is not allowed to place legal hold (strictly court, prosecutor, sho, config_admin)
+    hold_attempt = client.post(
+        f"/documents/{doc_id}/legal-hold",
+        json={"legal_hold": True, "reason": "Officer unilateral hold"},
+        headers=auth_headers(io_token),
+    )
+    assert hold_attempt.status_code == 403
+    assert "Role not permitted" in hold_attempt.json()["detail"]
+
+    # IO role is not allowed to delete documents (strictly court, config_admin)
+    delete_attempt = client.delete(f"/documents/{doc_id}", headers=auth_headers(io_token))
+    assert delete_attempt.status_code == 403
+    assert "Role not permitted" in delete_attempt.json()["detail"]
 
 

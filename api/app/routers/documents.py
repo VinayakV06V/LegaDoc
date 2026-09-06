@@ -217,10 +217,12 @@ def get_document(
         version=document.version,
         status=document.status,
         chain_status=document.chain_status,
+        retention_legal_hold=document.retention_legal_hold or False,
         text=view["text"],
         download_url=download_url,
         doc_hash=document.doc_hash,
     )
+
 
 
 @router.get("/{document_id}/versions", response_model=list[schemas.DocumentVersionSummary])
@@ -341,5 +343,112 @@ def correct_redaction_tag(
         version=document.version,
         status=document.status,
         chain_status=document.chain_status,
+        retention_legal_hold=document.retention_legal_hold or False,
         text=view["text"],
     )
+
+
+@router.post("/{document_id}/legal-hold", response_model=schemas.LegalHoldResponse)
+def set_document_legal_hold(
+    document_id: str,
+    body: schemas.LegalHoldRequest,
+    claims: dict = Depends(require_role("court", "prosecutor", "sho", "config_admin")),
+    db: Session = Depends(get_db),
+):
+    """POST /documents/:id/legal-hold — Court, Prosecutor, SHO, or Config Admin.
+    Places or releases an evidentiary retention legal hold on a document.
+    When active, the document is protected against deletion/purging (HTTP 409).
+    """
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    document = db.get(models.Document, doc_uuid)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    document.retention_legal_hold = body.legal_hold
+    db.commit()
+    db.refresh(document)
+
+    action = "document_legal_hold_placed" if body.legal_hold else "document_legal_hold_released"
+    write_audit_log(
+        db,
+        action=action,
+        case_id=document.case_id,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"reason": body.reason, "legal_hold": body.legal_hold},
+    )
+
+    return schemas.LegalHoldResponse(
+        document_id=document.id,
+        case_id=document.case_id,
+        retention_legal_hold=document.retention_legal_hold,
+        status=document.status,
+    )
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_200_OK)
+def delete_document(
+    document_id: str,
+    claims: dict = Depends(require_role("court", "config_admin")),
+    db: Session = Depends(get_db),
+    storage: ObjectStorage = Depends(get_storage),
+):
+    """DELETE /documents/:id — Court or Config Admin.
+    Permanently purges a document and its stored object, PROVIDED no retention legal hold is active.
+    If retention_legal_hold is True, deletion is strictly prohibited and returns HTTP 409 Conflict.
+    """
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    document = db.get(models.Document, doc_uuid)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    if document.retention_legal_hold:
+        write_audit_log(
+            db,
+            action="document_deletion_blocked_legal_hold",
+            case_id=document.case_id,
+            actor_user_id=UUID(claims["sub"]),
+            target_type="document",
+            target_id=document.id,
+            metadata={"reason": "Active retention legal hold prevents destruction"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is subject to an active retention legal hold and cannot be deleted or purged.",
+        )
+
+    # Clean up physical storage object
+    if document.storage_path:
+        storage.delete(document.storage_path)
+
+    # Delete any related sensitivity tags
+    db.query(models.DocumentSensitivityTag).filter(models.DocumentSensitivityTag.document_id == document.id).delete()
+
+    write_audit_log(
+        db,
+        action="document_purged",
+        case_id=document.case_id,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"doc_type": document.doc_type, "version": document.version},
+    )
+
+    db.delete(document)
+    db.commit()
+
+    return {"detail": "Document successfully purged", "document_id": str(doc_uuid)}
+

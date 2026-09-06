@@ -92,6 +92,7 @@ class DocumentView(BaseModel):
     version: int
     status: str
     chain_status: str
+    retention_legal_hold: bool = False
     text: Optional[str] = None  # None while status != "ready"; masked or full depending on role
     download_url: Optional[str] = None
     doc_hash: Optional[str] = None
@@ -111,8 +112,21 @@ class ChainStatusResponse(BaseModel):
     chain_status: str
 
 
+class LegalHoldRequest(BaseModel):
+    legal_hold: bool
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class LegalHoldResponse(BaseModel):
+    document_id: UUID
+    case_id: UUID
+    retention_legal_hold: bool
+    status: str
+
+
 class RedactTagRequest(BaseModel):
     entity_type: str
+
     span_start: int
     span_end: int
 

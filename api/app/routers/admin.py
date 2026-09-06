@@ -9,6 +9,8 @@ everything in this file. Security Auditor owns audit.py's ai-parser endpoint
 instead — never both from the same role.
 """
 
+import secrets
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,7 +19,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.audit import write_audit_log
 from app.database import get_db
-from app.security import require_role
+from app.security import require_role, hash_api_key
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -413,7 +415,9 @@ def list_admin_audit_logs(
     if target_type:
         query = query.filter(models.AuditLog.target_type == target_type)
 
-    rows = query.order_by(models.AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    # seq, not created_at — see models.AuditLog.seq: wall-clock timestamps can tie
+    # between rapid writes, seq is the actual write-order guarantee.
+    rows = query.order_by(models.AuditLog.seq.desc()).offset(offset).limit(limit).all()
 
     # Pre-fetch user map for actor names
     actor_ids = {r.actor_user_id for r in rows if r.actor_user_id is not None}
@@ -441,28 +445,230 @@ def list_admin_audit_logs(
     return results
 
 
-# ---------- Schema & Requirements Endpoints (Explicit 501 Not Implemented) ----------
+# ---------- Document Schema & Recognizer Configuration ----------
 
-@router.get("/document-schemas")
-def list_document_schemas(claims: dict = Depends(require_role("config_admin"))):
-    """GET /admin/document-schemas — Config Admin.
-    Explicit 501: Dynamic document schema configuration is not implemented in this build.
-    """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Dynamic document schema configuration is not implemented in this build. Sensitivity tiers and recognizers are governed by static pipeline policies in app/redaction.py."
+@router.get("/document-schemas", response_model=list[schemas.DocumentSchemaResponse])
+def list_document_schemas(
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """GET /admin/document-schemas — Config Admin. List all configured document schemas with their recognizer mappings."""
+    return db.query(models.DocumentSchemaConfig).order_by(models.DocumentSchemaConfig.created_at).all()
+
+
+@router.post("/document-schemas", response_model=schemas.DocumentSchemaResponse, status_code=status.HTTP_201_CREATED)
+def create_document_schema(
+    body: schemas.DocumentSchemaCreateRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """POST /admin/document-schemas — Config Admin. Create a new document schema."""
+    doc_type_normalized = body.doc_type.strip()
+    if not doc_type_normalized:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="doc_type cannot be empty."
+        )
+
+    if body.tier not in (1, 2, 3):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tier must be 1, 2, or 3."
+        )
+
+    if body.tier == 3:
+        if body.sensitivity_fields is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 3 schemas must have null sensitivity_fields (inherits generic default profile)."
+            )
+    else:
+        if not body.sensitivity_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 1 and Tier 2 schemas must specify non-empty sensitivity_fields."
+            )
+
+    existing = db.query(models.DocumentSchemaConfig).filter(
+        models.DocumentSchemaConfig.doc_type == doc_type_normalized
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Document schema for '{doc_type_normalized}' already exists."
+        )
+
+    fields_data = [f.model_dump() for f in body.sensitivity_fields] if body.sensitivity_fields is not None else None
+    schema_config = models.DocumentSchemaConfig(
+        doc_type=doc_type_normalized,
+        tier=body.tier,
+        sensitivity_fields=fields_data,
+    )
+    db.add(schema_config)
+    db.commit()
+    db.refresh(schema_config)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="document_schema_created",
+        actor_user_id=actor_id,
+        target_type="document_schema",
+        target_id=schema_config.id,
+        metadata={
+            "doc_type": schema_config.doc_type,
+            "tier": schema_config.tier,
+            "sensitivity_fields": schema_config.sensitivity_fields,
+        }
     )
 
+    return schema_config
 
-@router.post("/document-schemas/{doc_type}/recognizers")
-def set_recognizer_mapping(doc_type: str, claims: dict = Depends(require_role("config_admin"))):
-    """POST /admin/document-schemas/:type/recognizers — Config Admin.
-    Explicit 501: Dynamic entity recognizer mapping is not implemented in this build.
-    """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Dynamic entity recognizer mapping is not implemented in this build. Entity mappings are currently static."
+
+@router.put("/document-schemas/{doc_type}", response_model=schemas.DocumentSchemaResponse)
+def update_document_schema(
+    doc_type: str,
+    body: schemas.DocumentSchemaUpdateRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """PUT /admin/document-schemas/{doc_type} — Config Admin. Update an existing document schema."""
+    schema_config = db.query(models.DocumentSchemaConfig).filter(
+        models.DocumentSchemaConfig.doc_type == doc_type.strip()
+    ).first()
+    if not schema_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document schema for '{doc_type}' not found."
+        )
+
+    target_tier = body.tier if body.tier is not None else schema_config.tier
+    if target_tier not in (1, 2, 3):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tier must be 1, 2, or 3."
+        )
+
+    if "sensitivity_fields" in body.model_fields_set:
+        target_fields = [f.model_dump() for f in body.sensitivity_fields] if body.sensitivity_fields is not None else None
+    else:
+        target_fields = schema_config.sensitivity_fields
+
+    if target_tier == 3:
+        if target_fields is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 3 schemas must have null sensitivity_fields (inherits generic default profile)."
+            )
+    else:
+        if not target_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier 1 and Tier 2 schemas must specify non-empty sensitivity_fields."
+            )
+
+    prev_tier = schema_config.tier
+    prev_fields = schema_config.sensitivity_fields
+
+    schema_config.tier = target_tier
+    schema_config.sensitivity_fields = target_fields
+
+    db.commit()
+    db.refresh(schema_config)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="document_schema_updated",
+        actor_user_id=actor_id,
+        target_type="document_schema",
+        target_id=schema_config.id,
+        metadata={
+            "doc_type": schema_config.doc_type,
+            "previous_tier": prev_tier,
+            "new_tier": schema_config.tier,
+            "previous_sensitivity_fields": prev_fields,
+            "new_sensitivity_fields": schema_config.sensitivity_fields,
+        }
     )
+
+    return schema_config
+
+
+@router.post("/document-schemas/{doc_type}/recognizers", response_model=list[schemas.RecognizerMappingResponse])
+def set_recognizer_mappings(
+    doc_type: str,
+    body: schemas.RecognizerMappingSetRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db)
+):
+    """POST /admin/document-schemas/{doc_type}/recognizers — Config Admin. Full replace of recognizer mappings for a doc type."""
+    schema_config = db.query(models.DocumentSchemaConfig).filter(
+        models.DocumentSchemaConfig.doc_type == doc_type.strip()
+    ).first()
+    if not schema_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document schema for '{doc_type}' not found."
+        )
+
+    # Validate referential integrity: every field_name in body must match sensitivity_fields in schema
+    valid_fields = set()
+    if schema_config.sensitivity_fields:
+        for f in schema_config.sensitivity_fields:
+            if isinstance(f, dict) and "field_name" in f:
+                valid_fields.add(f["field_name"])
+
+    for item in body.mappings:
+        if item.field_name not in valid_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Field '{item.field_name}' does not exist in sensitivity_fields for schema '{doc_type}'."
+            )
+
+    prev_mappings = [
+        {"entity_type": rm.entity_type, "field_name": rm.field_name}
+        for rm in schema_config.recognizer_mappings
+    ]
+
+    # Full replace: delete existing mappings for this document_schema_id
+    db.query(models.RecognizerMapping).filter(
+        models.RecognizerMapping.document_schema_id == schema_config.id
+    ).delete()
+
+    # Insert new mappings
+    for item in body.mappings:
+        rm = models.RecognizerMapping(
+            document_schema_id=schema_config.id,
+            entity_type=item.entity_type.strip(),
+            field_name=item.field_name.strip(),
+        )
+        db.add(rm)
+
+    db.commit()
+    db.refresh(schema_config)
+
+    new_mappings = schema_config.recognizer_mappings
+    new_mappings_audit = [
+        {"entity_type": item.entity_type.strip(), "field_name": item.field_name.strip()}
+        for item in body.mappings
+    ]
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="recognizer_mapping_updated",
+        actor_user_id=actor_id,
+        target_type="document_schema",
+        target_id=schema_config.id,
+        metadata={
+            "doc_type": schema_config.doc_type,
+            "previous_mappings": prev_mappings,
+            "new_mappings": new_mappings_audit,
+        }
+    )
+
+    return new_mappings
 
 
 @router.get("/stage-requirements")
@@ -474,3 +680,125 @@ def list_stage_requirements(claims: dict = Depends(require_role("config_admin"))
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Dynamic stage requirements configuration is not implemented in this build. Case stage progression rules are currently static."
     )
+
+
+# ---------- API Key Management (user-bound programmatic access) ----------
+
+def _generate_api_key() -> str:
+    """256 bits of OS entropy, prefixed so a leaked key is instantly
+    recognizable and distinguishable from a JWT in any log. The prefix shown
+    to admins is derived from this same key's tail — enough to match a key to
+    its row in the UI, never enough to reconstruct or brute-force it."""
+    return f"legadoc_{secrets.token_hex(32)}"
+
+
+@router.post("/api-keys", response_model=schemas.ApiKeyCreatedResponse, status_code=status.HTTP_201_CREATED)
+def create_api_key(
+    body: schemas.ApiKeyCreateRequest,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db),
+):
+    """POST /admin/api-keys — Config Admin. Create a user-bound API key for
+    programmatic access. The raw key is returned exactly once and is NEVER
+    stored — only its SHA-256 hash is persisted, so it cannot be recovered
+    from the database later. Keys act as their owning user, inheriting that
+    user's org_id, role, and case-access scoping."""
+    owner = db.get(models.User, body.user_id)
+    if owner is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    raw_key = _generate_api_key()
+    row = models.ApiKey(
+        user_id=body.user_id,
+        name=body.name.strip() or "api-key",
+        key_hash=hash_api_key(raw_key),
+        key_prefix=f"legadoc_{raw_key[-8:]}",
+        created_by_user_id=UUID(claims["sub"]),
+        expires_at=body.expires_at,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="api_key_created",
+        actor_user_id=actor_id,
+        target_type="api_key",
+        target_id=row.id,
+        metadata={"key_name": row.name, "owner_user_id": str(body.user_id), "key_prefix": row.key_prefix},
+    )
+
+    return schemas.ApiKeyCreatedResponse(
+        id=row.id,
+        user_id=row.user_id,
+        name=row.name,
+        key=raw_key,
+        key_prefix=row.key_prefix,
+        expires_at=row.expires_at,
+        created_at=row.created_at,
+    )
+
+
+@router.get("/api-keys", response_model=list[schemas.ApiKeyView])
+def list_api_keys(
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db),
+):
+    """GET /admin/api-keys — Config Admin. List API keys with their prefix
+    and status. Raw keys are never returned or stored, so nothing here can
+    leak them."""
+    rows = db.query(models.ApiKey).order_by(models.ApiKey.created_at).all()
+    owner_ids = {r.user_id for r in rows}
+    owners = {u.id: u for u in db.query(models.User).filter(models.User.id.in_(owner_ids)).all()} if owner_ids else {}
+    results = []
+    for r in rows:
+        owner = owners.get(r.user_id)
+        results.append(
+            schemas.ApiKeyView(
+                id=r.id,
+                user_id=r.user_id,
+                user_name=owner.name if owner else None,
+                user_email=owner.email if owner else None,
+                name=r.name,
+                key_prefix=r.key_prefix,
+                created_at=r.created_at,
+                last_used_at=r.last_used_at,
+                expires_at=r.expires_at,
+                revoked_at=r.revoked_at,
+            )
+        )
+    return results
+
+
+@router.post("/api-keys/{key_id}/revoke")
+def revoke_api_key(
+    key_id: UUID,
+    claims: dict = Depends(require_role("config_admin")),
+    db: Session = Depends(get_db),
+):
+    """POST /admin/api-keys/:id/revoke — Config Admin. Revoke an API key
+    immediately (soft delete: the row stays for audit, revoked_at stops it
+    being accepted). Requires a follow-up wipe from the audit trail in a real
+    rotation — revocation is the breaking action, deletion is evidence."""
+    row = db.get(models.ApiKey, key_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
+    if row.revoked_at is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="API key is already revoked")
+
+    row.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+
+    actor_id = UUID(claims["sub"]) if "sub" in claims else None
+    write_audit_log(
+        db,
+        action="api_key_revoked",
+        actor_user_id=actor_id,
+        target_type="api_key",
+        target_id=row.id,
+        metadata={"key_name": row.name, "key_prefix": row.key_prefix},
+    )
+
+    return {"status": "revoked", "key_id": str(key_id), "key_prefix": row.key_prefix}

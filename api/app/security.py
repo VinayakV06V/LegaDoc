@@ -5,12 +5,18 @@ happen — per SYSTEM_DESIGN.md's B2B multi-tenant overlay, don't reinvent
 this per-endpoint.
 """
 
+import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import struct
+import time
+from typing import Optional
 from uuid import UUID, uuid4
 
 import bcrypt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
@@ -18,7 +24,12 @@ from app.config import settings
 from app.database import get_db
 from app import models
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+# auto_error=False on both schemes: get_current_claims branches on whichever
+# credential is actually present (Bearer JWT for humans in the browser, an
+# X-API-Key header for programmatic clients) instead of letting the OAuth2
+# scheme shortcut past the API-key branch with its own 401.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # Plain `bcrypt`, not passlib's CryptContext — passlib's bcrypt backend
 # detection has a real, live incompatibility with recent bcrypt releases
@@ -27,6 +38,83 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 # so calling bcrypt directly removes the dependency conflict entirely rather
 # than pinning around it.
 _BCRYPT_MAX_BYTES = 72  # bcrypt's own hard limit — truncate rather than error
+
+DISALLOWED_WEAK_PASSWORDS = {
+    "password", "password123", "admin123", "12345678", "qwerty123", "letmein123"
+}
+
+
+def validate_password_strength(password: str) -> None:
+    """Validates that a password satisfies minimum complexity requirements (NIST SP 800-63B).
+    Raises HTTPException(422) if the password is too weak.
+    """
+    if not password or len(password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must be at least 8 characters long."
+        )
+    if len(password) > 128:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must not exceed 128 characters."
+        )
+    if password.lower() in DISALLOWED_WEAK_PASSWORDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password is too common and easily guessable."
+        )
+    has_letter = any(c.isalpha() for c in password)
+    has_digit_or_special = any(c.isdigit() or not c.isalnum() for c in password)
+    if not (has_letter and has_digit_or_special):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must contain at least one letter and at least one number or special character."
+        )
+
+
+def get_user_mfa_secret(user_id: str, email: str, jwt_secret: str = settings.JWT_SECRET) -> str:
+    """Derives a deterministic, high-entropy 160-bit base32 TOTP secret for a user
+    using HMAC-SHA256, eliminating the need for a separate database secret column.
+    """
+    secret_bytes = hmac.new(
+        jwt_secret.encode("utf-8"),
+        f"legadoc:mfa:{user_id}:{email}".encode("utf-8"),
+        hashlib.sha256
+    ).digest()[:20]
+    return base64.b32encode(secret_bytes).decode("utf-8")
+
+
+def generate_totp_code(secret: str, interval: int = 30) -> str:
+    """Generates a standard 6-digit TOTP code per RFC 6238."""
+    secret_bytes = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
+    counter = int(time.time() // interval)
+    msg = struct.pack(">Q", counter)
+    digest = hmac.new(secret_bytes, msg, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return f"{code_int % 1000000:06d}"
+
+
+def verify_totp_code(secret: str, code: str, interval: int = 30, window: int = 1) -> bool:
+    """Verifies a 6-digit TOTP code against a secret with +/- window steps."""
+    if not code or not secret:
+        return False
+    clean_code = code.strip()
+    try:
+        secret_bytes = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
+    except Exception:
+        secret_bytes = secret.encode("utf-8")
+
+    current_step = int(time.time() // interval)
+    for step in range(current_step - window, current_step + window + 1):
+        msg = struct.pack(">Q", step)
+        digest = hmac.new(secret_bytes, msg, hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        code_int = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+        expected = f"{code_int % 1000000:06d}"
+        if hmac.compare_digest(expected, clean_code):
+            return True
+    return False
 
 
 def _prepare(plain: str) -> bytes:
@@ -58,6 +146,15 @@ def dummy_password_check(plain: str) -> None:
     doesn't exist. The result is discarded — this call exists only for its
     timing, not its answer."""
     verify_password(plain, DUMMY_HASH)
+
+
+def hash_api_key(plain: str) -> str:
+    """SHA-256 of the raw key — the only form ever persisted. The keys are
+    256-bit random values (see admin.create_api_key), so SHA-256 is the right
+    tool here: fast, collision-resistant, and not subject to bcrypt's 72-byte
+    input truncation. bcrypt stays for passwords, where attackers reuse weak
+    passphrases and need the salt+work-factor."""
+    return hashlib.sha256(plain.encode("utf-8")).hexdigest()
 
 
 def _create_token(user_id: str, org_id: str, role: str, expires_delta: timedelta, token_type: str) -> str:
@@ -96,9 +193,60 @@ def decode_token(token: str, expected_type: str = "access") -> dict:
     return payload
 
 
-def get_current_claims(token: str = Depends(oauth2_scheme)) -> dict:
-    """Every protected endpoint depends on this (directly or via require_role)."""
-    return decode_token(token, expected_type="access")
+def _as_utc(dt: datetime) -> datetime:
+    """Normalize a possibly-naive stored datetime to a tz-aware UTC datetime.
+    Both SQLite and Postgres round-trip naive datetimes; timestamps are always
+    written as UTC (see audit.py), so attaching UTC is always correct."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _api_key_claims(raw_key: str, db: Session) -> dict:
+    """Resolves an X-API-Key header to the same claims dict a JWT would carry.
+    The key acts as its owning user: {sub, org_id, role, type} feed straight
+    into require_role, get_current_user, and the org/case scoping checks with
+    zero router changes. Every failure mode is a generic 401 — never reveal
+    whether the key was unknown, revoked, expired, or its owner vanished."""
+    row = db.query(models.ApiKey).filter(models.ApiKey.key_hash == hash_api_key(raw_key)).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    now = datetime.now(timezone.utc)
+    if row.revoked_at is not None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+    if row.expires_at is not None and _as_utc(row.expires_at) < now:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    user = db.get(models.User, row.user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    row.last_used_at = now
+    db.commit()
+
+    return {
+        "sub": str(user.id),
+        "org_id": str(user.org_id),
+        "role": user.role,
+        "type": "api-key",
+    }
+
+
+def get_current_claims(
+    token: Optional[str] = Depends(oauth2_scheme),
+    api_key: Optional[str] = Depends(api_key_header),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Every protected endpoint depends on this (directly or via require_role).
+
+    Two credentials are accepted, both resolving to the same claims shape:
+    - Authorization: Bearer <JWT>  — human sessions from the auth routers
+    - X-API-Key: <key>            — user-bound programmatic keys (see ApiKey)
+    An X-API-Key takes precedence if both are sent."""
+    if api_key:
+        return _api_key_claims(api_key, db)
+    if token:
+        return decode_token(token, expected_type="access")
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
 
 def get_current_user(claims: dict = Depends(get_current_claims), db: Session = Depends(get_db)) -> models.User:
@@ -224,4 +372,9 @@ def verify_evidence_request_org_access(
             )
         return req
 
-    return req
+    # Default-deny: only the target authority organization (or oversight roles) can fulfill/touch evidence requests
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Role not permitted to fulfill or access external evidence requests",
+    )
+

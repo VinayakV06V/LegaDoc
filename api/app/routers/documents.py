@@ -153,17 +153,41 @@ async def upload_document(
     return document
 
 
-@router.get("")
+@router.get("", response_model=list[schemas.DocumentReviewItem])
 def list_documents_needing_review(
-    status_filter: Optional[str] = Query(default=None, alias="status"),
+    status_filter: Optional[str] = Query(default="needs_review", alias="status"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     claims: dict = Depends(require_role("config_admin", "io")),
+    db: Session = Depends(get_db),
 ):
     """GET /documents?status=needs_review — Config Admin / Investigating
-    Officer. Not implemented in this pass — deferred alongside the AI
-    Parser worker itself, since a document can only reach needs_review
-    through a pipeline stage (real Presidio/spaCy tagging) that isn't wired
-    up in this environment."""
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Not implemented yet")
+    Officer. Lists documents flagged for manual review or falling back from OCR/AI-Parser.
+    - When called by an IO: scoped strictly to cases assigned to that IO.
+    - When called by Config Admin: across all cases.
+    - raw_text is structurally excluded from the list schema to prevent bulk PII leaks.
+    """
+    target_status = status_filter if status_filter is not None else "needs_review"
+    if target_status not in ("needs_review", "processing", "ready"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document status filter '{target_status}'. Must be one of: needs_review, processing, ready",
+        )
+
+    query = db.query(models.Document).filter(models.Document.status == target_status)
+
+    user_role = claims.get("role")
+    if user_role == "io":
+        user_id = UUID(claims["sub"])
+        query = query.join(
+            models.CaseAssignment,
+            models.CaseAssignment.case_id == models.Document.case_id,
+        ).filter(models.CaseAssignment.io_user_id == user_id)
+
+    # Order FIFO (oldest first) so review backlogs don't starve
+    docs = query.order_by(models.Document.created_at.asc()).offset(offset).limit(limit).all()
+
+    return docs
 
 
 @router.get("/{document_id}", response_model=schemas.DocumentView)
@@ -193,10 +217,12 @@ def get_document(
         version=document.version,
         status=document.status,
         chain_status=document.chain_status,
+        retention_legal_hold=document.retention_legal_hold or False,
         text=view["text"],
         download_url=download_url,
         doc_hash=document.doc_hash,
     )
+
 
 
 @router.get("/{document_id}/versions", response_model=list[schemas.DocumentVersionSummary])
@@ -317,5 +343,112 @@ def correct_redaction_tag(
         version=document.version,
         status=document.status,
         chain_status=document.chain_status,
+        retention_legal_hold=document.retention_legal_hold or False,
         text=view["text"],
     )
+
+
+@router.post("/{document_id}/legal-hold", response_model=schemas.LegalHoldResponse)
+def set_document_legal_hold(
+    document_id: str,
+    body: schemas.LegalHoldRequest,
+    claims: dict = Depends(require_role("court", "prosecutor", "sho", "config_admin")),
+    db: Session = Depends(get_db),
+):
+    """POST /documents/:id/legal-hold — Court, Prosecutor, SHO, or Config Admin.
+    Places or releases an evidentiary retention legal hold on a document.
+    When active, the document is protected against deletion/purging (HTTP 409).
+    """
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    document = db.get(models.Document, doc_uuid)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    document.retention_legal_hold = body.legal_hold
+    db.commit()
+    db.refresh(document)
+
+    action = "document_legal_hold_placed" if body.legal_hold else "document_legal_hold_released"
+    write_audit_log(
+        db,
+        action=action,
+        case_id=document.case_id,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"reason": body.reason, "legal_hold": body.legal_hold},
+    )
+
+    return schemas.LegalHoldResponse(
+        document_id=document.id,
+        case_id=document.case_id,
+        retention_legal_hold=document.retention_legal_hold,
+        status=document.status,
+    )
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_200_OK)
+def delete_document(
+    document_id: str,
+    claims: dict = Depends(require_role("court", "config_admin")),
+    db: Session = Depends(get_db),
+    storage: ObjectStorage = Depends(get_storage),
+):
+    """DELETE /documents/:id — Court or Config Admin.
+    Permanently purges a document and its stored object, PROVIDED no retention legal hold is active.
+    If retention_legal_hold is True, deletion is strictly prohibited and returns HTTP 409 Conflict.
+    """
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    document = db.get(models.Document, doc_uuid)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    assert_case_access(document.case_id, claims, db)
+
+    if document.retention_legal_hold:
+        write_audit_log(
+            db,
+            action="document_deletion_blocked_legal_hold",
+            case_id=document.case_id,
+            actor_user_id=UUID(claims["sub"]),
+            target_type="document",
+            target_id=document.id,
+            metadata={"reason": "Active retention legal hold prevents destruction"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is subject to an active retention legal hold and cannot be deleted or purged.",
+        )
+
+    # Clean up physical storage object
+    if document.storage_path:
+        storage.delete(document.storage_path)
+
+    # Delete any related sensitivity tags
+    db.query(models.DocumentSensitivityTag).filter(models.DocumentSensitivityTag.document_id == document.id).delete()
+
+    write_audit_log(
+        db,
+        action="document_purged",
+        case_id=document.case_id,
+        actor_user_id=UUID(claims["sub"]),
+        target_type="document",
+        target_id=document.id,
+        metadata={"doc_type": document.doc_type, "version": document.version},
+    )
+
+    db.delete(document)
+    db.commit()
+
+    return {"detail": "Document successfully purged", "document_id": str(doc_uuid)}
+

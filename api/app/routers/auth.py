@@ -43,22 +43,18 @@ def login(request: Request, body: schemas.LoginRequest, db: Session = Depends(ge
     if not security.verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    # MFA evaluation: enforced if mfa_enabled is True, or in non-test envs for high-privilege roles
-    mfa_required = user.mfa_enabled
-    if not mfa_required and settings.ENV != "test" and user.role in {"config_admin", "security_auditor", "court"}:
-        mfa_required = True
-
-    if mfa_required:
+    # MFA evaluation: enforced when user.mfa_enabled is True
+    if user.mfa_enabled:
         if not body.mfa_code:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="MFA code required"
+                detail="MFA code required",
             )
         secret = security.get_user_mfa_secret(str(user.id), user.email, settings.JWT_SECRET)
         if not security.verify_totp_code(secret, body.mfa_code):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid MFA code"
+                detail="Invalid MFA code",
             )
 
     org_id = str(user.org_id)
